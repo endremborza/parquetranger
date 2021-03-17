@@ -1,0 +1,201 @@
+from pathlib import Path
+
+import dask.dataframe as dd
+import pandas as pd
+import pytest
+from moto import mock_s3
+
+from parquetranger import TableRepo
+from parquetranger.core import EXTENSION
+
+df1 = pd.DataFrame(
+    {
+        "A": [1, 2, 3],
+        "B": ["x", "y", "z"],
+        "C": [1, 2, 1],
+        "C2": ["a", "a", "b"],
+    },
+    index=["a1", "a2", "a3"],
+)
+df2 = pd.DataFrame(
+    {
+        "A": [5, 6, 7],
+        "B": ["c", "d", "e"],
+        "C": [2, 1, 2],
+        "C2": ["b", "b", "a"],
+    },
+    index=["b1", "b2", "b3"],
+)
+
+df3 = pd.DataFrame(
+    {
+        "A": [9, 3, 1],
+        "B": ["f", "g", "h"],
+        "C": [2, 1, 3],
+        "C2": ["a", "a", "a"],
+    },
+    index=["c1", "c2", "c3"],
+)
+
+df4 = pd.DataFrame(
+    {
+        "A": [10, 9, 17],
+        "B": ["x", "da", "ex"],
+        "C": [2, 1, 3],
+        "C2": ["ba", "b", "a"],
+    },
+    index=["b4", "b2", "b3"],
+)
+
+
+@pytest.mark.parametrize(
+    ["gb_cols"],
+    [
+        ("C",),
+        (["C", "C2"],),
+        (["C2", "C"],),
+    ],
+)
+def test_groupby(tmp_path, gb_cols):
+
+    troot = tmp_path / "data"
+    trepo = TableRepo(troot, group_cols=gb_cols)
+    base = []
+    for _df in [df1, df2, df3]:
+        trepo.extend(_df)
+        base.append(_df)
+        for gid, gdf in pd.concat(base).groupby(gb_cols):
+            if not isinstance(gid, tuple):
+                gid = (gid,)
+            gpath = Path(troot, *map(str, gid)).with_suffix(EXTENSION)
+            assert gdf.equals(pd.read_parquet(gpath))
+        conc = pd.concat(base)
+        full_df = trepo.get_full_df()
+        assert conc.reindex(full_df.index).equals(full_df)
+
+
+@pytest.mark.parametrize(
+    ["max_records", "n_files"],
+    [
+        (0, 1),
+        (10, 1),
+        (5, 2),
+        (3, 3),
+    ],
+)
+def test_extender_records(tmp_path, max_records, n_files):
+
+    trepo = TableRepo(tmp_path, max_records=max_records)
+    base = []
+    for _df in [df1, df2, df3]:
+        trepo.extend(_df)
+        base.append(_df)
+
+        conc = pd.concat(base)
+        full_df = trepo.get_full_df()
+        assert conc.reindex(full_df.index).equals(full_df)
+
+    assert trepo.n_files == n_files
+
+
+@pytest.mark.parametrize(
+    ["max_records", "n_files"],
+    [
+        (0, 1),
+        (10, 1),
+        (2, 2),
+    ],
+)
+def test_replace_records(tmp_path, max_records, n_files):
+    trepo = TableRepo(tmp_path, max_records=max_records)
+    trepo.replace_records(df2)
+
+    full_df = trepo.get_full_df()
+    assert df2.reindex(full_df.index).equals(full_df)
+
+    trepo.replace_records(df4)
+
+    full_df = trepo.get_full_df()
+    new_df = df2.drop(df4.index, errors="ignore").append(df4)
+    assert new_df.reindex(full_df.index).equals(full_df)
+    assert trepo.n_files == n_files
+
+
+def test_strin(tmp_path):
+    _basetest(TableRepo(str(tmp_path / "data" / "subdir")))
+
+
+@pytest.mark.parametrize(
+    ["s3_loc", "recs"],
+    [
+        ("s3://borza-test-bucket-1/data", 0),
+        ("s3://borza-test-bucket-1/subfing/data", 0),
+        ("s3://borza-test-bucket-1/subfing/data", 3),
+    ],
+)
+@mock_s3
+def notyet_test_s3(s3_loc, recs):
+    _basetest(TableRepo(s3_loc, recs))
+
+
+@pytest.mark.parametrize(
+    ["recs"],
+    [
+        (1,),
+        (0,),
+    ],
+)
+def test_ddf(tmp_path, recs):
+    base = []
+    trepo = TableRepo(tmp_path / "data", recs)
+    for _df in [df1, df2]:
+        trepo.extend(dd.from_pandas(_df, npartitions=1))
+        base.append(_df)
+        conc = pd.concat(base)
+        full_df = trepo.get_full_df()
+        assert conc.reindex(full_df.index).equals(full_df)
+        assert (
+            dd.read_parquet(trepo.full_path)
+            .compute()
+            .reindex(conc.index)
+            .equals(conc)
+        )
+
+
+@pytest.mark.parametrize(
+    ["recs"],
+    [
+        (10,),
+        (0,),
+    ],
+)
+def test_ddf_gb(tmp_path, recs):
+    base = []
+    troot = tmp_path / "fing"
+    trepo = TableRepo(troot, recs, group_cols="C")
+    for _df in [df1, df2]:
+        trepo.extend(dd.from_pandas(_df, npartitions=1))
+        base.append(_df)
+        conc = pd.concat(base)
+        full_df = trepo.get_full_df()
+        assert conc.reindex(full_df.index).equals(full_df)
+        for gid, gdf in pd.concat(base).groupby("C"):
+            pend = (str(gid),)
+            if recs:
+                pend = (str(gid), "file-0")
+            gpath = Path(troot, *pend).with_suffix(EXTENSION)
+            assert gdf.equals(pd.read_parquet(gpath))
+
+
+def _basetest(trepo: TableRepo):
+    base = []
+    for _df in [df1, df2]:
+        trepo.extend(_df)
+        base.append(_df)
+        conc = pd.concat(base)
+        full_df = trepo.get_full_df()
+        assert conc.reindex(full_df.index).equals(full_df)
+    trepo.replace_all(df3)
+    assert trepo.get_full_df().equals(df3)
+    trepo.purge()
+    assert trepo.get_full_df().empty

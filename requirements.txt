@@ -1,1 +1,6 @@
 toml
+pandas
+dask
+pyarrow
+s3path
+s3fs
