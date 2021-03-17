@@ -1,6 +1,6 @@
 toml
 pandas
-dask
+dask[dataframe]
 pyarrow
 s3path
 s3fs
