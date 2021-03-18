@@ -6,9 +6,9 @@ Welcome to parquetranger's documentation!
    :maxdepth: 2
    :caption: Contents:
 
-   autosumm
    notebooks/doc-000-intro
    notebooks/doc-001-quickstart
+   autosumm
    release_notes/main
 
 Indices and tables
