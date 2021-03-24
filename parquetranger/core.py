@@ -135,11 +135,11 @@ class TableRepo:
     @property
     def n_files(self):
         return len(self._get_full_paths())
-    
+
     @property
     def paths(self):
         return self._get_full_paths()
-    
+
     @property
     def dfs(self):
         for p in self.paths:
