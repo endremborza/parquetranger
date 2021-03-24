@@ -135,6 +135,15 @@ class TableRepo:
     @property
     def n_files(self):
         return len(self._get_full_paths())
+    
+    @property
+    def paths(self):
+        return self._get_full_paths()
+    
+    @property
+    def dfs(self):
+        for p in self.paths:
+            yield pd.read_parquet(p)
 
     def _extend(self, df, missing_rows_dic):
         start_rec = 0

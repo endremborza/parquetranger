@@ -69,6 +69,7 @@ def test_groupby(tmp_path, gb_cols):
                 gid = (gid,)
             gpath = Path(troot, *map(str, gid)).with_suffix(EXTENSION)
             assert gdf.equals(pd.read_parquet(gpath))
+            assert any(map(gdf.equals, trepo.dfs))
         conc = pd.concat(base)
         full_df = trepo.get_full_df()
         assert conc.reindex(full_df.index).equals(full_df)
