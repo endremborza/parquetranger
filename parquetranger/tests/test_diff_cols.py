@@ -3,12 +3,13 @@ import pytest
 
 from parquetranger import TableRepo
 
+
 @pytest.mark.parametrize(
     ["indices"],
     [
         (None,),
-        (pd.Series([1,2], name="fing"),),
-        (pd.MultiIndex.from_product([["A","C"], [1]], names=["ix", "iy"]),)
+        (pd.Series([1, 2], name="fing"),),
+        (pd.MultiIndex.from_product([["A", "C"], [1]], names=["ix", "iy"]),),
     ],
 )
 def test_diff_cols(tmp_path, indices):
