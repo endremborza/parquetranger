@@ -217,7 +217,7 @@ class TableRepo:
             cols = [
                 c
                 for c in ParquetFile(p).metadata.schema.names
-                if not c.startswith("__index")
+                if not (c.startswith("__index") or c in df.index.names)
             ]
             union = df.columns.union(cols)
             if union.difference(cols).shape[0]:
