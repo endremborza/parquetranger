@@ -3,6 +3,7 @@ from typing import Optional, Union
 
 import dask.dataframe as dd
 import pandas as pd
+from pyarrow.parquet import ParquetFile
 from s3path import S3Path
 
 EXTENSION = ".parquet"
@@ -12,7 +13,7 @@ RECORD_COUNT_FOR_EST = 500
 class TableRepo:
     f"""helps with storing parquet data in a directory
 
-    tires dividing based on group_cols, if that is None
+    tries dividing based on group_cols, if that is None
     tries dividing based on max_records, if max records is 0
     just writes the file to root_path.parquet
 
@@ -31,6 +32,7 @@ class TableRepo:
         root_path: Union[S3Path, Path, str],
         max_records: int = 0,
         group_cols: Optional[Union[str, list]] = None,
+        ensure_same_cols: bool = False,
     ):
         if isinstance(root_path, str):
             if root_path.startswith("s3://"):
@@ -52,8 +54,12 @@ class TableRepo:
         else:
             tomake = self._root_path
         tomake.mkdir(exist_ok=True, parents=True)
+        self._ensure_cols = ensure_same_cols
 
     def extend(self, df: Union[pd.DataFrame, dd.DataFrame], missdic=None):
+
+        if self._ensure_cols:
+            df = self._reindex_cols(df)
 
         if self.group_cols is not None:
             return self._gb_handle(df, "extend")
@@ -205,6 +211,21 @@ class TableRepo:
         )
         gpath = self._path_kls(self._root_path, *gid)
         getattr(TableRepo(gpath, self.max_records), funcname)(gdf)
+
+    def _reindex_cols(self, df):
+        for p in self.paths:
+            cols = [
+                c
+                for c in ParquetFile(p).metadata.schema.names
+                if not c.startswith("__index")
+            ]
+            union = df.columns.union(cols)
+            if union.difference(cols).shape[0]:
+                for reinp in self.paths:
+                    pd.read_parquet(reinp).reindex(union).to_parquet(reinp)
+            if union.difference(df.columns).shape[0]:
+                return df.reindex(union)
+        return df
 
 
 def _to_full_path(pobj):
