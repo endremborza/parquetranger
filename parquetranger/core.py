@@ -222,9 +222,12 @@ class TableRepo:
             union = df.columns.union(cols)
             if union.difference(cols).shape[0]:
                 for reinp in self.paths:
-                    pd.read_parquet(reinp).reindex(union).to_parquet(reinp)
+                    pd.read_parquet(reinp).reindex(union, axis=1).to_parquet(
+                        reinp
+                    )
             if union.difference(df.columns).shape[0]:
-                return df.reindex(union)
+                return df.reindex(union, axis=1)
+            break
         return df
 
 

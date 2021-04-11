@@ -15,9 +15,7 @@ def test_diff_cols(tmp_path):
     trepo.extend(_df2)
 
     df = trepo.get_full_df()
-    assert (
-        df.columns.difference(_df1.columns.union(_df2.columns)).shape[0] == 0
-    )
+    assert _df1.columns.union(_df2.columns).isin(df.columns).all()
 
 
 def test_diff_schema(tmp_path):
@@ -32,6 +30,4 @@ def test_diff_schema(tmp_path):
     trepo.extend(_df2)
 
     df = trepo.get_full_df()
-    assert (
-        df.columns.difference(_df1.columns.union(_df2.columns)).shape[0] == 0
-    )
+    assert _df1.columns.union(_df2.columns).isin(df.columns).all()
