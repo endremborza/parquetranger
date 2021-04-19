@@ -234,7 +234,7 @@ class TableRepo:
                 return df.reindex(union, axis=1)
             break
         return df
-    
+
     def _mkdirs(self):
         self._current_env_parent.mkdir(exist_ok=True, parents=True)
         if not self._is_single_file:

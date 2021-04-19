@@ -148,7 +148,7 @@ def test_gb_replace(tmp_path):
     trepo = TableRepo(tmp_path, group_cols="B")
     trepo.replace_records(_df1)
     assert _df1.equals(trepo.get_full_df())
-    
+
     trepo.replace_records(_df2, by_groups=True)
     assert _mdf.equals(trepo.get_full_df().sort_index())
 

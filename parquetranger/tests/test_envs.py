@@ -2,6 +2,7 @@ from parquetranger import TableRepo
 
 from .test_core import df1, df2
 
+
 def test_envs(tmp_path):
 
     defp = tmp_path / "def"
