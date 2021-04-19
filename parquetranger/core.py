@@ -43,7 +43,7 @@ class TableRepo:
 
         self._current_env_parent = _root_path.parent
         self._env_parents[DEFAULT_ENV] = self._current_env_parent
-        self._path_node = _root_path.name
+        self.name = _root_path.name
         self._mkdirs()
 
         self.max_records = max_records
@@ -238,11 +238,11 @@ class TableRepo:
     def _mkdirs(self):
         self._current_env_parent.mkdir(exist_ok=True, parents=True)
         if not self._is_single_file:
-            (self._current_env_parent / self._path_node).mkdir(exist_ok=True)
+            self._root_path.mkdir(exist_ok=True)
 
     @property
     def _root_path(self) -> Path:
-        return self._current_env_parent / self._path_node
+        return self._current_env_parent / self.name
 
 
 def _parse_path(path):

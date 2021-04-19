@@ -1,1 +1,1 @@
-- add env handling
+- add name prop
