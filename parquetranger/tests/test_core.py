@@ -122,6 +122,52 @@ def test_replace_records(tmp_path, max_records, n_files):
     assert trepo.n_files == n_files
 
 
+def test_gb_replace(tmp_path):
+
+    _df1 = pd.DataFrame(
+        {
+            "A": [1, 2, 3],
+            "B": ["x", "x", "y"],
+        },
+        index=["x1", "x2", "y1"],
+    )
+
+    _df2 = pd.DataFrame(
+        {
+            "A": [10, 20],
+            "B": ["x", "y"],
+        },
+        index=["x1", "y2"],
+    )
+
+    _mdf = pd.DataFrame(
+        {"A": [10, 2, 3, 20], "B": ["x", "x", "y", "y"]},
+        index=["x1", "x2", "y1", "y2"],
+    )
+
+    trepo = TableRepo(tmp_path, group_cols="B")
+    trepo.replace_records(_df1)
+    assert _df1.equals(trepo.get_full_df())
+    
+    trepo.replace_records(_df2, by_groups=True)
+    assert _mdf.equals(trepo.get_full_df().sort_index())
+
+    trepo.replace_groups(_df1)
+    assert _df1.equals(trepo.get_full_df().sort_index())
+
+    trepo.replace_records(dd.from_pandas(_df2, npartitions=1))
+    assert _mdf.equals(trepo.get_full_df().sort_index())
+
+
+def test_bygroups_error(tmp_path):
+    trepo = TableRepo(tmp_path / "fing")
+    with pytest.raises(TypeError):
+        trepo.replace_records(df1, by_groups=True)
+
+    with pytest.raises(TypeError):
+        trepo.replace_groups(df1)
+
+
 def test_strin(tmp_path):
     _basetest(TableRepo(str(tmp_path / "data" / "subdir")))
 

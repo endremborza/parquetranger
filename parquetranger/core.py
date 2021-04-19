@@ -1,5 +1,5 @@
 from pathlib import Path
-from typing import Optional, Union
+from typing import Dict, Optional, Union
 
 import dask.dataframe as dd
 import pandas as pd
@@ -8,6 +8,7 @@ from s3path import S3Path
 
 EXTENSION = ".parquet"
 RECORD_COUNT_FOR_EST = 500
+DEFAULT_ENV = "default-env"
 
 
 class TableRepo:
@@ -33,27 +34,24 @@ class TableRepo:
         max_records: int = 0,
         group_cols: Optional[Union[str, list]] = None,
         ensure_same_cols: bool = False,
+        env_parents: Optional[Dict[str, Union[S3Path, Path, str]]] = None,
     ):
-        if isinstance(root_path, str):
-            if root_path.startswith("s3://"):
-                self._root_path = S3Path(root_path[4:])
-            else:
-                self._root_path = Path(root_path)
-        else:
-            self._root_path = root_path
+        self._env_parents = env_parents or {}
+        self._is_single_file = (not max_records) and (group_cols is None)
+
+        _root_path = _parse_path(root_path)
+
+        self._current_env_parent = _root_path.parent
+        self._env_parents[DEFAULT_ENV] = self._current_env_parent
+        self._path_node = _root_path.name
+        self._mkdirs()
 
         self.max_records = max_records
         self.group_cols = (
             [group_cols] if isinstance(group_cols, str) else group_cols
         )
-        self._is_single_file = (not max_records) and (group_cols is None)
         self._path_kls = type(self._root_path)
 
-        if self._is_single_file:
-            tomake = self._root_path.parent
-        else:
-            tomake = self._root_path
-        tomake.mkdir(exist_ok=True, parents=True)
         self._ensure_cols = ensure_same_cols
 
     def extend(self, df: Union[pd.DataFrame, dd.DataFrame], missdic=None):
@@ -133,6 +131,13 @@ class TableRepo:
         if self.n_files:
             return dd.read_parquet(self._get_full_paths())
         return dd.from_pandas(pd.DataFrame(), npartitions=1)
+
+    def set_env(self, env: str):
+        self._current_env_parent = _parse_path(self._env_parents[env])
+        self._mkdirs()
+
+    def set_default_env(self):
+        self.set_env(DEFAULT_ENV)
 
     @property
     def full_path(self):
@@ -229,9 +234,27 @@ class TableRepo:
                 return df.reindex(union, axis=1)
             break
         return df
+    
+    def _mkdirs(self):
+        self._current_env_parent.mkdir(exist_ok=True, parents=True)
+        if not self._is_single_file:
+            (self._current_env_parent / self._path_node).mkdir(exist_ok=True)
+
+    @property
+    def _root_path(self) -> Path:
+        return self._current_env_parent / self._path_node
+
+
+def _parse_path(path):
+    if isinstance(path, str):
+        if path.startswith("s3://"):
+            return S3Path(path[4:])  # pragma: nocover
+        else:
+            return Path(path)
+    return path
 
 
 def _to_full_path(pobj):
     if isinstance(pobj, S3Path):
-        return pobj.as_uri()
-    return str(pobj)
+        return pobj.as_uri()  # pragma: nocover
+    return pobj.as_posix()
