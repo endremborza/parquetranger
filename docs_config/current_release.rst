@@ -1,1 +1,1 @@
-- add name prop
+- remove duplicate indices
