@@ -121,6 +121,13 @@ def test_replace_records(tmp_path, max_records, n_files):
     assert new_df.reindex(full_df.index).equals(full_df)
     assert trepo.n_files == n_files
 
+    dupind_df = pd.DataFrame(
+        {"A": [2, 1], "B": ["1", "1"], "C": [1, 1], "C2": ["1", "1"]},
+        index=["b2", "b2"],
+    )
+    trepo.replace_records(dupind_df)
+    assert full_df.shape[0] == trepo.get_full_df().shape[0]
+
 
 def test_gb_replace(tmp_path):
 

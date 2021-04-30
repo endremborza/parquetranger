@@ -91,6 +91,9 @@ class TableRepo:
         inds = df.index
         if isinstance(df, dd.DataFrame):
             inds = inds.compute()
+            df = df.groupby(df.index).first()
+        else:
+            df = df.loc[~inds.duplicated(keep="first"), :]
 
         missdic = {}
         for full_path in self._get_full_paths():
