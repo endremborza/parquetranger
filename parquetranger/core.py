@@ -35,7 +35,7 @@ class TableRepo:
         group_cols: Optional[Union[str, list]] = None,
         ensure_same_cols: bool = False,
         env_parents: Optional[Dict[str, Union[S3Path, Path, str]]] = None,
-        mkdirs = True,
+        mkdirs=True,
     ):
         self._env_parents = env_parents or {}
         self._is_single_file = (not max_records) and (group_cols is None)

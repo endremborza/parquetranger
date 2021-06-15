@@ -1,8 +1,9 @@
-from parquetranger import __version__, TableRepo
+from parquetranger import TableRepo, __version__
 
 
 def test_import():
     assert isinstance(__version__, str)
+
 
 def test_mkdirs(tmp_path):
     npth = tmp_path / "not-yet"
