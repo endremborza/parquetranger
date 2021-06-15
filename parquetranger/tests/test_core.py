@@ -74,6 +74,7 @@ def test_groupby(tmp_path, gb_cols):
         full_df = trepo.get_full_df()
         assert conc.reindex(full_df.index).equals(full_df)
 
+
 def test_gb_maxrecs(tmp_path):
     troot = tmp_path / "data"
     trepo = TableRepo(troot, group_cols="C2", max_records=2)
@@ -83,7 +84,7 @@ def test_gb_maxrecs(tmp_path):
     assert len(trepo.paths) == 4
     full_df = trepo.get_full_df()
     assert pd.concat([df1, df2]).reindex(full_df.index).equals(full_df)
-    
+
 
 @pytest.mark.parametrize(
     ["max_records", "n_files"],
