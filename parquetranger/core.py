@@ -35,9 +35,11 @@ class TableRepo:
         group_cols: Optional[Union[str, list]] = None,
         ensure_same_cols: bool = False,
         env_parents: Optional[Dict[str, Union[S3Path, Path, str]]] = None,
+        mkdirs = True,
     ):
         self._env_parents = env_parents or {}
         self._is_single_file = (not max_records) and (group_cols is None)
+        self._remake_dirs = mkdirs
 
         _root_path = _parse_path(root_path)
 
@@ -239,6 +241,8 @@ class TableRepo:
         return df
 
     def _mkdirs(self):
+        if not self._remake_dirs:
+            return
         self._current_env_parent.mkdir(exist_ok=True, parents=True)
         if not self._is_single_file:
             self._root_path.mkdir(exist_ok=True)
