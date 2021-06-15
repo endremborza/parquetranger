@@ -139,7 +139,7 @@ class TableRepo:
         self._current_env_parent = _parse_path(self._env_parents[env])
         self._mkdirs()
 
-    def set_default_env(self):
+    def set_env_to_default(self):
         self.set_env(DEFAULT_ENV)
 
     @property

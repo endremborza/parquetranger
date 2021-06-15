@@ -16,6 +16,6 @@ def test_envs(tmp_path):
 
     assert trepo.get_full_df().equals(df2)
 
-    trepo.set_default_env()
+    trepo.set_env_to_default()
 
     assert trepo.get_full_df().equals(df1)
