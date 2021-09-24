@@ -1,14 +1,17 @@
+import json
 from pathlib import Path
 from typing import Dict, Optional, Union
 
 import dask.dataframe as dd
 import pandas as pd
-from pyarrow.parquet import ParquetFile
+import pyarrow as pa
+import pyarrow.parquet as pq
 from s3path import S3Path
 
 EXTENSION = ".parquet"
 RECORD_COUNT_FOR_EST = 500
 DEFAULT_ENV = "default-env"
+_T_JSON_SERIALIZABLE = Union[str, int, list, dict]
 
 
 class TableRepo:
@@ -36,7 +39,9 @@ class TableRepo:
         ensure_same_cols: bool = False,
         env_parents: Optional[Dict[str, Union[S3Path, Path, str]]] = None,
         mkdirs=True,
+        extra_metadata: Optional[Dict[str, _T_JSON_SERIALIZABLE]] = None,
     ):
+        self.extra_metadata = extra_metadata or {}
         self._env_parents = env_parents or {}
         self._is_single_file = (not max_records) and (group_cols is None)
         self._remake_dirs = mkdirs
@@ -69,7 +74,7 @@ class TableRepo:
                 df = df.compute()
             self.get_full_df().append(
                 df, ignore_index=isinstance(df.index, pd.RangeIndex)
-            ).to_parquet(self.full_path)
+            ).pipe(self._write_df_to_path, path=self.full_path)
         else:
             missdic = missdic or {}
             if self.n_files:
@@ -105,7 +110,7 @@ class TableRepo:
             if interlen == 0:
                 continue
             missdic[full_path] = interlen
-            odf.drop(interinds).to_parquet(full_path)
+            odf.drop(interinds).pipe(self._write_df_to_path, path=full_path)
 
         self.extend(df, missdic)
 
@@ -161,6 +166,23 @@ class TableRepo:
         for p in self.paths:
             yield pd.read_parquet(p)
 
+    @property
+    def full_metadata(self):
+        for path in self.paths:
+            return _parse_metadata(pq.read_schema(path).metadata)
+
+    def _write_df_to_path(self, df, path):
+        table = pa.Table.from_pandas(df)
+        pq.write_table(
+            table.replace_schema_metadata(
+                {
+                    **table.schema.metadata,
+                    **_render_metadata(self.extra_metadata),
+                }
+            ),
+            path,
+        )
+
     def _extend(self, df, missing_rows_dic):
         start_rec = 0
         if isinstance(df, dd.DataFrame):
@@ -172,14 +194,14 @@ class TableRepo:
             pd.read_parquet(fpath).append(
                 df.iloc[start_rec:end, :],
                 ignore_index=isinstance(df.index, pd.RangeIndex),
-            ).to_parquet(fpath)
+            ).pipe(self._write_df_to_path, path=fpath)
             start_rec = end
         for i, fpath in zip(
             range(start_rec, df.shape[0], self.max_records),
             self._next_full_path(),
         ):
             end = i + self.max_records
-            df.iloc[i:end, :].to_parquet(fpath)
+            df.iloc[i:end, :].pipe(self._write_df_to_path, path=fpath)
 
     def _get_main_pobj(self):
         if self._is_single_file:
@@ -226,14 +248,14 @@ class TableRepo:
         for p in self.paths:
             cols = [
                 c
-                for c in ParquetFile(p).metadata.schema.names
+                for c in pq.read_schema(p).names
                 if not (c.startswith("__index") or c in df.index.names)
             ]
             union = df.columns.union(cols)
             if union.difference(cols).shape[0]:
                 for reinp in self.paths:
-                    pd.read_parquet(reinp).reindex(union, axis=1).to_parquet(
-                        reinp
+                    self._write_df_to_path(
+                        pd.read_parquet(reinp).reindex(union, axis=1), reinp
                     )
             if union.difference(df.columns).shape[0]:
                 return df.reindex(union, axis=1)
@@ -265,3 +287,11 @@ def _to_full_path(pobj):
     if isinstance(pobj, S3Path):
         return pobj.as_uri()  # pragma: nocover
     return pobj.as_posix()
+
+
+def _render_metadata(meta_dic):
+    return {k: json.dumps(v).encode("utf-8") for k, v in meta_dic.items()}
+
+
+def _parse_metadata(meta_dic):
+    return {k.decode("utf-8"): json.loads(v) for k, v in meta_dic.items()}
