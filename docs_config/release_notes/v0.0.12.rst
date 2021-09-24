@@ -1,0 +1,4 @@
+v0.0.12
+------
+
+- add extra metadata feature
