@@ -1,12 +1,17 @@
 import json
 from pathlib import Path
-from typing import Dict, Optional, Union
+from threading import Lock
+from typing import TYPE_CHECKING, Dict, Optional, Union
 
 import dask.dataframe as dd
 import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
-from s3path import S3Path
+from distributed.client import Client
+from distributed.lock import Lock as DaskLock
+
+if TYPE_CHECKING:
+    from s3path import S3Path
 
 EXTENSION = ".parquet"
 RECORD_COUNT_FOR_EST = 500
@@ -33,13 +38,14 @@ class TableRepo:
 
     def __init__(
         self,
-        root_path: Union[S3Path, Path, str],
+        root_path: Union["S3Path", Path, str],
         max_records: int = 0,
         group_cols: Optional[Union[str, list]] = None,
         ensure_same_cols: bool = False,
-        env_parents: Optional[Dict[str, Union[S3Path, Path, str]]] = None,
+        env_parents: Optional[Dict[str, Union["S3Path", Path, str]]] = None,
         mkdirs=True,
         extra_metadata: Optional[Dict[str, _T_JSON_SERIALIZABLE]] = None,
+        client_address=None,
     ):
         self.extra_metadata = extra_metadata or {}
         self._env_parents = env_parents or {}
@@ -60,31 +66,39 @@ class TableRepo:
         self._path_kls = type(self._root_path)
 
         self._ensure_cols = ensure_same_cols
+        self._locks = LockStore(client_address)
 
     def extend(self, df: Union[pd.DataFrame, dd.DataFrame], missdic=None):
-
         if self._ensure_cols:
             df = self._reindex_cols(df)
 
         if self.group_cols is not None:
             return self._gb_handle(df, "extend")
 
+        if isinstance(df, dd.DataFrame):
+            return df.map_partitions(
+                self.extend, missdic=missdic, meta=("none", object)
+            ).compute()
+
         if self.max_records == 0:
-            if isinstance(df, dd.DataFrame):
-                df = df.compute()
-            self.get_full_df().append(
-                df, ignore_index=isinstance(df.index, pd.RangeIndex)
-            ).pipe(self._write_df_to_path, path=self.full_path)
-        else:
-            missdic = missdic or {}
-            if self.n_files:
-                last_path = self._get_last_full_path()
-                missing = (
-                    self.max_records - pd.read_parquet(last_path).shape[0]
-                )
-                if missing > 0:
-                    missdic[last_path] = missing
-            self._extend(df, missdic)
+            lock = self._locks.get(self.full_path)
+            return (
+                self.get_full_df()
+                .append(df, ignore_index=isinstance(df.index, pd.RangeIndex))
+                .pipe(self._write_df_to_path, path=self.full_path, lock=lock)
+            )
+
+        extension_lock = self._locks.get(
+            f"EXT - {_to_full_path(self._root_path)}"
+        )
+        missdic = missdic or {}
+        if self.n_files:
+            last_path = self._get_last_full_path()
+            missing = self.max_records - pd.read_parquet(last_path).shape[0]
+            if missing > 0:
+                missdic[last_path] = missing
+        self._extend_parts(df, missdic)
+        extension_lock.release()
 
     def replace_records(
         self, df: Union[pd.DataFrame, dd.DataFrame], by_groups=False
@@ -104,13 +118,17 @@ class TableRepo:
 
         missdic = {}
         for full_path in self._get_full_paths():
+            lock = self._locks.get(full_path)
             odf = pd.read_parquet(full_path)
             interinds = odf.index.intersection(inds)
             interlen = len(interinds)
             if interlen == 0:
+                lock.release()
                 continue
             missdic[full_path] = interlen
-            odf.drop(interinds).pipe(self._write_df_to_path, path=full_path)
+            odf.drop(interinds).pipe(
+                self._write_df_to_path, path=full_path, lock=lock
+            )
 
         self.extend(df, missdic)
 
@@ -171,8 +189,11 @@ class TableRepo:
         for path in self.paths:
             return _parse_metadata(pq.read_schema(path).metadata)
 
-    def _write_df_to_path(self, df, path):
+    def _write_df_to_path(self, df, path, lock: Optional[Lock] = None):
+        """if lock is given, it should already be acquired"""
         table = pa.Table.from_pandas(df)
+        if lock is None:
+            lock = self._locks.get(path)
         pq.write_table(
             table.replace_schema_metadata(
                 {
@@ -182,13 +203,10 @@ class TableRepo:
             ),
             path,
         )
+        lock.release()
 
-    def _extend(self, df, missing_rows_dic):
+    def _extend_parts(self, df, missing_rows_dic):
         start_rec = 0
-        if isinstance(df, dd.DataFrame):
-            df = df.compute()
-            # TODO: this needs to work better
-
         for fpath, missing_n in missing_rows_dic.items():
             end = start_rec + missing_n
             pd.read_parquet(fpath).append(
@@ -222,10 +240,9 @@ class TableRepo:
         return self._get_full_paths()[-1]
 
     def _next_full_path(self):
-        n = self.n_files
         while True:
-            yield _to_full_path(self._root_path / f"file-{n}{EXTENSION}")
-            n += 1
+            fname = "file-{:020d} - {}".format(self.n_files + 1, EXTENSION)
+            yield _to_full_path(self._root_path / fname)
 
     def _gb_handle(self, df: Union[pd.DataFrame, dd.DataFrame], funcname):
         _gb = df.groupby(self.group_cols)
@@ -237,12 +254,13 @@ class TableRepo:
     def _gapply(self, gdf, funcname):
         gid = (
             gdf.iloc[[0], :]
-            .reset_index()[self.group_cols]
+            .reset_index()
+            .loc[:, self.group_cols]
             .values[0, :]
             .astype(str)
         )
         gpath = self._path_kls(self._root_path, *gid)
-        getattr(TableRepo(gpath, self.max_records), funcname)(gdf)
+        getattr(TableRepo(gpath, **self._grouped_kwargs), funcname)(gdf)
 
     def _reindex_cols(self, df):
         for p in self.paths:
@@ -273,20 +291,52 @@ class TableRepo:
     def _root_path(self) -> Path:
         return self._current_env_parent / self.name
 
+    @property
+    def _grouped_kwargs(self):
+        return dict(
+            max_records=self.max_records,
+            ensure_same_cols=self._ensure_cols,
+            mkdirs=self._mkdirs,
+            extra_metadata=self.extra_metadata,
+            client_address=self._locks.address,
+        )
+
+
+class LockStore:
+    def __init__(self, address) -> None:
+        self.address = address
+        self._locks = {}
+
+    def get(self, key) -> Lock:
+        try:
+            ret = self._locks[key]
+        except KeyError:
+            ret = self._locks[key] = self._new(key)
+        ret.acquire()
+        return ret
+
+    def _new(self, key):
+        if self.address is None:
+            return Lock()
+        return DaskLock(key, Client(self.address))
+
 
 def _parse_path(path):
     if isinstance(path, str):
-        if path.startswith("s3://"):
-            return S3Path(path[4:])  # pragma: nocover
+        if path.startswith("s3://"):  # pragma: nocover
+            from s3path import S3Path
+
+            return S3Path(path[4:])
         else:
             return Path(path)
     return path
 
 
 def _to_full_path(pobj):
-    if isinstance(pobj, S3Path):
+    try:
+        return pobj.as_posix()
+    except AttributeError:
         return pobj.as_uri()  # pragma: nocover
-    return pobj.as_posix()
 
 
 def _render_metadata(meta_dic):

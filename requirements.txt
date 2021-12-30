@@ -1,6 +1,8 @@
 toml
 pandas
 dask[dataframe]
+distributed
 pyarrow
 s3path
 s3fs
+tqdm
