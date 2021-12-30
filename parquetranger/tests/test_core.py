@@ -204,17 +204,19 @@ def notyet_test_s3(s3_loc, recs):
 
 
 @pytest.mark.parametrize(
-    ["recs"],
+    ["max_recs", "partitions"],
     [
-        (1,),
-        (0,),
+        (1, 1),
+        (0, 2),
+        (1, 2),
+        (0, 1),
     ],
 )
-def test_ddf(tmp_path, recs):
+def test_ddf(tmp_path, max_recs, partitions):
     base = []
-    trepo = TableRepo(tmp_path / "data", recs)
+    trepo = TableRepo(tmp_path / "data", max_recs)
     for _df in [df1, df2]:
-        trepo.extend(dd.from_pandas(_df, npartitions=1))
+        trepo.extend(dd.from_pandas(_df, npartitions=partitions))
         base.append(_df)
         conc = pd.concat(base)
         full_df = trepo.get_full_df()
