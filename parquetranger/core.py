@@ -1,16 +1,16 @@
 import json
+from functools import cached_property
 from pathlib import Path
 from threading import Lock
-from typing import TYPE_CHECKING, Dict, Optional, Union
+from typing import TYPE_CHECKING, Callable, Dict, Optional, Union
 
-import dask.dataframe as dd
 import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
-from distributed.client import Client
-from distributed.lock import Lock as DaskLock
+import redis_lock
 
 if TYPE_CHECKING:
+    import dask.dataframe as dd
     from s3path import S3Path
 
 EXTENSION = ".parquet"
@@ -45,7 +45,7 @@ class TableRepo:
         env_parents: Optional[Dict[str, Union["S3Path", Path, str]]] = None,
         mkdirs=True,
         extra_metadata: Optional[Dict[str, _T_JSON_SERIALIZABLE]] = None,
-        client_address=None,
+        lock_store_loader: Optional[Callable] = None,
     ):
         self.extra_metadata = extra_metadata or {}
         self._env_parents = env_parents or {}
@@ -66,16 +66,16 @@ class TableRepo:
         self._path_kls = type(self._root_path)
 
         self._ensure_cols = ensure_same_cols
-        self._locks = LockStore(client_address)
+        self._locks = LockStore(lock_store_loader)
 
-    def extend(self, df: Union[pd.DataFrame, dd.DataFrame], missdic=None):
+    def extend(self, df: Union[pd.DataFrame, "dd.DataFrame"], missdic=None):
         if self._ensure_cols:
             df = self._reindex_cols(df)
 
         if self.group_cols is not None:
             return self._gb_handle(df, "extend")
 
-        if isinstance(df, dd.DataFrame):
+        if not isinstance(df, pd.DataFrame):
             return df.map_partitions(
                 self.extend, missdic=missdic, meta=("none", object)
             ).compute()
@@ -101,7 +101,7 @@ class TableRepo:
         extension_lock.release()
 
     def replace_records(
-        self, df: Union[pd.DataFrame, dd.DataFrame], by_groups=False
+        self, df: Union[pd.DataFrame, "dd.DataFrame"], by_groups=False
     ):
         """replace records in files based on index"""
         if by_groups:
@@ -110,7 +110,7 @@ class TableRepo:
             return self._gb_handle(df, "replace_records")
 
         inds = df.index
-        if isinstance(df, dd.DataFrame):
+        if not isinstance(df, pd.DataFrame):
             inds = inds.compute()
             df = df.groupby(df.index).first()
         else:
@@ -132,7 +132,7 @@ class TableRepo:
 
         self.extend(df, missdic)
 
-    def replace_groups(self, df: Union[pd.DataFrame, dd.DataFrame]):
+    def replace_groups(self, df: Union[pd.DataFrame, "dd.DataFrame"]):
         """replace files based on file name
 
         only viable if `group_cols` is set
@@ -142,7 +142,7 @@ class TableRepo:
 
         return self._gb_handle(df, "replace_all")
 
-    def replace_all(self, df: Union[pd.DataFrame, dd.DataFrame]):
+    def replace_all(self, df: Union[pd.DataFrame, "dd.DataFrame"]):
         """purges everything and writes df instead"""
         self.purge()
         self.extend(df)
@@ -156,6 +156,8 @@ class TableRepo:
         return self.get_full_ddf().compute()
 
     def get_full_ddf(self):
+        import dask.dataframe as dd
+
         if self.n_files:
             return dd.read_parquet(self._get_full_paths())
         return dd.from_pandas(pd.DataFrame(), npartitions=1)
@@ -241,12 +243,12 @@ class TableRepo:
 
     def _next_full_path(self):
         while True:
-            fname = "file-{:020d} - {}".format(self.n_files + 1, EXTENSION)
+            fname = "file-{:020d}{}".format(self.n_files + 1, EXTENSION)
             yield _to_full_path(self._root_path / fname)
 
-    def _gb_handle(self, df: Union[pd.DataFrame, dd.DataFrame], funcname):
+    def _gb_handle(self, df: Union[pd.DataFrame, "dd.DataFrame"], funcname):
         _gb = df.groupby(self.group_cols)
-        if isinstance(df, dd.DataFrame):
+        if not isinstance(df, pd.DataFrame):
             _gb.apply(self._gapply, funcname, meta=("none", object)).compute()
         else:
             _gb.apply(self._gapply, funcname)
@@ -298,27 +300,29 @@ class TableRepo:
             ensure_same_cols=self._ensure_cols,
             mkdirs=self._mkdirs,
             extra_metadata=self.extra_metadata,
-            client_address=self._locks.address,
+            lock_store_loader=self._locks.conn_loader,
         )
 
 
 class LockStore:
-    def __init__(self, address) -> None:
-        self.address = address
+    def __init__(self, conn_loader) -> None:
+        self.conn_loader = conn_loader
         self._locks = {}
 
     def get(self, key) -> Lock:
-        try:
-            ret = self._locks[key]
-        except KeyError:
-            ret = self._locks[key] = self._new(key)
+        if self.conn_loader is None:
+            try:
+                ret = self._locks[key]
+            except KeyError:
+                ret = self._locks[key] = Lock()
+        else:
+            ret = redis_lock.Lock(self.conn, key)
         ret.acquire()
         return ret
 
-    def _new(self, key):
-        if self.address is None:
-            return Lock()
-        return DaskLock(key, Client(self.address))
+    @cached_property
+    def conn(self):
+        return self.conn_loader()
 
 
 def _parse_path(path):
