@@ -140,7 +140,7 @@ def test_replace_records(tmp_path, max_records, n_files):
     assert full_df.shape[0] == trepo.get_full_df().shape[0]
 
 
-def test_gb_replace(tmp_path):
+def test_gb_replace(tmp_path, dask_client):
 
     _df1 = pd.DataFrame(
         {
@@ -163,7 +163,11 @@ def test_gb_replace(tmp_path):
         index=["x1", "x2", "y1", "y2"],
     )
 
-    trepo = TableRepo(tmp_path, group_cols="B")
+    trepo = TableRepo(
+        tmp_path,
+        group_cols="B",
+        dask_client_address=dask_client.scheduler.address,
+    )
     trepo.replace_records(_df1)
     assert _df1.equals(trepo.get_full_df())
 
@@ -249,7 +253,7 @@ def test_ddf_gb(tmp_path, recs):
         for gid, gdf in pd.concat(base).groupby("C"):
             pend = (str(gid),)
             if recs:
-                pend = (str(gid), "file-0")
+                pend = (str(gid), "file-{:020d}".format(1))
             gpath = Path(troot, *pend).with_suffix(EXTENSION)
             assert gdf.equals(pd.read_parquet(gpath))
 

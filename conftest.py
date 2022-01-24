@@ -1,13 +1,15 @@
-from parquetranger.parallel import try_client
+import pytest
+
+from distributed import Client, LocalCluster
 
 W_OPTION = "workers"
 
 def pytest_addoption(parser):
-    parser.addoption(f"--{W_OPTION}", default=3, help="number of dask workers")
+    parser.addoption(f"--{W_OPTION}", default=3, help="number of dask/ray workers")
 
 
-def pytest_generate_tests(metafunc):
-    cliet_key = "client"
-    if cliet_key in metafunc.fixturenames:
-        wcount = int(metafunc.config.getoption(W_OPTION))
-        metafunc.parametrize(cliet_key, [try_client(wcount)])
+@pytest.fixture(scope="session")
+def dask_client(pytestconfig):
+    wcount = int(pytestconfig.getoption(W_OPTION))
+    with LocalCluster(n_workers=wcount) as cluster, Client(cluster) as client:
+        yield client
