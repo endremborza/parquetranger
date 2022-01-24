@@ -1,20 +1,21 @@
 import json
-from functools import cached_property
+from functools import partial, reduce
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from threading import Lock
-from typing import TYPE_CHECKING, Callable, Dict, Optional, Union
+from typing import TYPE_CHECKING, Dict, Optional, Union
 
 import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
-import redis_lock
+from atqo import parallel_map
+from atqo.lock_stores import get_lock_store
 
 if TYPE_CHECKING:
     import dask.dataframe as dd
     from s3path import S3Path
 
 EXTENSION = ".parquet"
-RECORD_COUNT_FOR_EST = 500
 DEFAULT_ENV = "default-env"
 _T_JSON_SERIALIZABLE = Union[str, int, list, dict]
 
@@ -45,7 +46,8 @@ class TableRepo:
         env_parents: Optional[Dict[str, Union["S3Path", Path, str]]] = None,
         mkdirs=True,
         extra_metadata: Optional[Dict[str, _T_JSON_SERIALIZABLE]] = None,
-        lock_store_loader: Optional[Callable] = None,
+        dask_client_address=None,
+        lock_store_str: Optional[str] = None,
     ):
         self.extra_metadata = extra_metadata or {}
         self._env_parents = env_parents or {}
@@ -66,30 +68,50 @@ class TableRepo:
         self._path_kls = type(self._root_path)
 
         self._ensure_cols = ensure_same_cols
-        self._locks = LockStore(lock_store_loader)
+        default_str = f"file://{TemporaryDirectory().name}"  # TODO
+        self._lock_store_str = lock_store_str or default_str
+        self._locks = get_lock_store(lock_store_str)
 
-    def extend(self, df: Union[pd.DataFrame, "dd.DataFrame"], missdic=None):
+        try:
+            import dask.dataframe  # noqa
+            from distributed.client import Client, get_client
+
+            try:
+                client = get_client(dask_client_address)
+            except ValueError:
+                client = Client()
+            _addr = client.scheduler.address
+        except ImportError:
+            _addr = None
+        self._client_address = _addr
+
+    def extend(
+        self,
+        df: Union[pd.DataFrame, "dd.DataFrame"],
+        missdic=None,
+        try_dask=True,
+    ):
         if self._ensure_cols:
             df = self._reindex_cols(df)
 
-        if self.group_cols is not None:
-            return self._gb_handle(df, "extend")
-
         if not isinstance(df, pd.DataFrame):
             return df.map_partitions(
-                self.extend, missdic=missdic, meta=("none", object)
+                self.extend, missdic=missdic, try_dask=False, meta={}
             ).compute()
 
+        if self.group_cols is not None:
+            return self._gb_handle(df, self.extend, try_dask=try_dask)
+
         if self.max_records == 0:
-            lock = self._locks.get(self.full_path)
+            lock = self._locks.acquire(self.full_path)
             return (
-                self.get_full_df()
+                self.get_full_df(try_dask=try_dask)
                 .append(df, ignore_index=isinstance(df.index, pd.RangeIndex))
                 .pipe(self._write_df_to_path, path=self.full_path, lock=lock)
             )
 
-        extension_lock = self._locks.get(
-            f"EXT - {_to_full_path(self._root_path)}"
+        extension_lock = self._locks.acquire(
+            f"{_to_full_path(self._root_path)} - ext"
         )
         missdic = missdic or {}
         if self.n_files:
@@ -100,6 +122,15 @@ class TableRepo:
         self._extend_parts(df, missdic)
         extension_lock.release()
 
+    def batch_extend(self, df_iterator, batch_size=20):
+        DEFAULT_MULTI_API = "mp"
+        parallel_map(
+            partial(self.extend, try_dask=False),
+            df_iterator,
+            batch_size=batch_size,
+            dist_api=DEFAULT_MULTI_API,
+        )
+
     def replace_records(
         self, df: Union[pd.DataFrame, "dd.DataFrame"], by_groups=False
     ):
@@ -107,7 +138,7 @@ class TableRepo:
         if by_groups:
             if self.group_cols is None:
                 raise TypeError("only works if group cols is set")
-            return self._gb_handle(df, "replace_records")
+            return self._gb_handle(df, self.replace_records)
 
         inds = df.index
         if not isinstance(df, pd.DataFrame):
@@ -118,7 +149,7 @@ class TableRepo:
 
         missdic = {}
         for full_path in self._get_full_paths():
-            lock = self._locks.get(full_path)
+            lock = self._locks.acquire(full_path)
             odf = pd.read_parquet(full_path)
             interinds = odf.index.intersection(inds)
             interlen = len(interinds)
@@ -140,7 +171,7 @@ class TableRepo:
         if self.group_cols is None:
             raise TypeError("only works if group cols is set")
 
-        return self._gb_handle(df, "replace_all")
+        return self._gb_handle(df, self.replace_all)
 
     def replace_all(self, df: Union[pd.DataFrame, "dd.DataFrame"]):
         """purges everything and writes df instead"""
@@ -152,8 +183,14 @@ class TableRepo:
         for p in self._get_pobjs():
             p.unlink()
 
-    def get_full_df(self):
-        return self.get_full_ddf().compute()
+    def get_full_df(self, try_dask=True):
+        if try_dask and (self._client_address is not None):
+            return self.get_full_ddf().compute()
+        return reduce(
+            lambda l, r: l.append(pd.read_parquet(r)),
+            self._get_full_paths(),
+            pd.DataFrame(),
+        )
 
     def get_full_ddf(self):
         import dask.dataframe as dd
@@ -195,7 +232,7 @@ class TableRepo:
         """if lock is given, it should already be acquired"""
         table = pa.Table.from_pandas(df)
         if lock is None:
-            lock = self._locks.get(path)
+            lock = self._locks.acquire(path)
         pq.write_table(
             table.replace_schema_metadata(
                 {
@@ -246,14 +283,16 @@ class TableRepo:
             fname = "file-{:020d}{}".format(self.n_files + 1, EXTENSION)
             yield _to_full_path(self._root_path / fname)
 
-    def _gb_handle(self, df: Union[pd.DataFrame, "dd.DataFrame"], funcname):
+    def _gb_handle(
+        self, df: Union[pd.DataFrame, "dd.DataFrame"], fun, **kwargs
+    ):
         _gb = df.groupby(self.group_cols)
         if not isinstance(df, pd.DataFrame):
-            _gb.apply(self._gapply, funcname, meta=("none", object)).compute()
+            _gb.apply(self._gapply, fun, meta={}, **kwargs).compute()
         else:
-            _gb.apply(self._gapply, funcname)
+            _gb.apply(self._gapply, fun, **kwargs)
 
-    def _gapply(self, gdf, funcname):
+    def _gapply(self, gdf, fun, **kwargs):
         gid = (
             gdf.iloc[[0], :]
             .reset_index()
@@ -262,7 +301,9 @@ class TableRepo:
             .astype(str)
         )
         gpath = self._path_kls(self._root_path, *gid)
-        getattr(TableRepo(gpath, **self._grouped_kwargs), funcname)(gdf)
+        getattr(TableRepo(gpath, **self._grouped_kwargs), fun.__name__)(
+            gdf, **kwargs
+        )
 
     def _reindex_cols(self, df):
         for p in self.paths:
@@ -300,29 +341,9 @@ class TableRepo:
             ensure_same_cols=self._ensure_cols,
             mkdirs=self._mkdirs,
             extra_metadata=self.extra_metadata,
-            lock_store_loader=self._locks.conn_loader,
+            dask_client_address=self._client_address,
+            lock_store_str=self._lock_store_str,
         )
-
-
-class LockStore:
-    def __init__(self, conn_loader) -> None:
-        self.conn_loader = conn_loader
-        self._locks = {}
-
-    def get(self, key) -> Lock:
-        if self.conn_loader is None:
-            try:
-                ret = self._locks[key]
-            except KeyError:
-                ret = self._locks[key] = Lock()
-        else:
-            ret = redis_lock.Lock(self.conn, key)
-        ret.acquire()
-        return ret
-
-    @cached_property
-    def conn(self):
-        return self.conn_loader()
 
 
 def _parse_path(path):
