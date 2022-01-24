@@ -1,4 +1,4 @@
 toml
 pandas
 pyarrow
-atqo
+atqo>=0.0.8
