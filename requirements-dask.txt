@@ -1,0 +1,3 @@
+dask[dataframe]
+distributed
+s3path>=0.3.3
