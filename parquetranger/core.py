@@ -1,15 +1,21 @@
 import json
+from functools import partial, reduce
 from pathlib import Path
-from typing import Dict, Optional, Union
+from tempfile import TemporaryDirectory
+from threading import Lock
+from typing import TYPE_CHECKING, Dict, Optional, Union
 
-import dask.dataframe as dd
 import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
-from s3path import S3Path
+from atqo import parallel_map
+from atqo.lock_stores import get_lock_store
+
+if TYPE_CHECKING:
+    import dask.dataframe as dd
+    from s3path import S3Path
 
 EXTENSION = ".parquet"
-RECORD_COUNT_FOR_EST = 500
 DEFAULT_ENV = "default-env"
 _T_JSON_SERIALIZABLE = Union[str, int, list, dict]
 
@@ -33,13 +39,15 @@ class TableRepo:
 
     def __init__(
         self,
-        root_path: Union[S3Path, Path, str],
+        root_path: Union["S3Path", Path, str],
         max_records: int = 0,
         group_cols: Optional[Union[str, list]] = None,
         ensure_same_cols: bool = False,
-        env_parents: Optional[Dict[str, Union[S3Path, Path, str]]] = None,
+        env_parents: Optional[Dict[str, Union["S3Path", Path, str]]] = None,
         mkdirs=True,
         extra_metadata: Optional[Dict[str, _T_JSON_SERIALIZABLE]] = None,
+        dask_client_address=None,
+        lock_store_str: Optional[str] = None,
     ):
         self.extra_metadata = extra_metadata or {}
         self._env_parents = env_parents or {}
@@ -60,43 +68,80 @@ class TableRepo:
         self._path_kls = type(self._root_path)
 
         self._ensure_cols = ensure_same_cols
+        default_str = f"file://{TemporaryDirectory().name}"  # TODO
+        self._lock_store_str = lock_store_str or default_str
+        self._locks = get_lock_store(lock_store_str)
 
-    def extend(self, df: Union[pd.DataFrame, dd.DataFrame], missdic=None):
+        try:
+            import dask.dataframe  # noqa
+            from distributed.client import Client, get_client
 
+            try:
+                client = get_client(dask_client_address)
+            except ValueError:
+                client = Client()
+            _addr = client.scheduler.address
+        except ImportError:
+            _addr = None
+        self._client_address = _addr
+
+    def extend(
+        self,
+        df: Union[pd.DataFrame, "dd.DataFrame"],
+        missdic=None,
+        try_dask=True,
+    ):
         if self._ensure_cols:
             df = self._reindex_cols(df)
 
+        if not isinstance(df, pd.DataFrame):
+            return df.map_partitions(
+                self.extend, missdic=missdic, try_dask=False, meta={}
+            ).compute()
+
         if self.group_cols is not None:
-            return self._gb_handle(df, "extend")
+            return self._gb_handle(df, self.extend, try_dask=try_dask)
 
         if self.max_records == 0:
-            if isinstance(df, dd.DataFrame):
-                df = df.compute()
-            self.get_full_df().append(
-                df, ignore_index=isinstance(df.index, pd.RangeIndex)
-            ).pipe(self._write_df_to_path, path=self.full_path)
-        else:
-            missdic = missdic or {}
-            if self.n_files:
-                last_path = self._get_last_full_path()
-                missing = (
-                    self.max_records - pd.read_parquet(last_path).shape[0]
-                )
-                if missing > 0:
-                    missdic[last_path] = missing
-            self._extend(df, missdic)
+            lock = self._locks.acquire(self.full_path)
+            return (
+                self.get_full_df(try_dask=try_dask)
+                .append(df, ignore_index=isinstance(df.index, pd.RangeIndex))
+                .pipe(self._write_df_to_path, path=self.full_path, lock=lock)
+            )
+
+        extension_lock = self._locks.acquire(
+            f"{_to_full_path(self._root_path)} - ext"
+        )
+        missdic = missdic or {}
+        if self.n_files:
+            last_path = self._get_last_full_path()
+            missing = self.max_records - pd.read_parquet(last_path).shape[0]
+            if missing > 0:
+                missdic[last_path] = missing
+        self._extend_parts(df, missdic)
+        extension_lock.release()
+
+    def batch_extend(self, df_iterator, batch_size=20):
+        DEFAULT_MULTI_API = "mp"
+        parallel_map(
+            partial(self.extend, try_dask=False),
+            df_iterator,
+            batch_size=batch_size,
+            dist_api=DEFAULT_MULTI_API,
+        )
 
     def replace_records(
-        self, df: Union[pd.DataFrame, dd.DataFrame], by_groups=False
+        self, df: Union[pd.DataFrame, "dd.DataFrame"], by_groups=False
     ):
         """replace records in files based on index"""
         if by_groups:
             if self.group_cols is None:
                 raise TypeError("only works if group cols is set")
-            return self._gb_handle(df, "replace_records")
+            return self._gb_handle(df, self.replace_records)
 
         inds = df.index
-        if isinstance(df, dd.DataFrame):
+        if not isinstance(df, pd.DataFrame):
             inds = inds.compute()
             df = df.groupby(df.index).first()
         else:
@@ -104,17 +149,21 @@ class TableRepo:
 
         missdic = {}
         for full_path in self._get_full_paths():
+            lock = self._locks.acquire(full_path)
             odf = pd.read_parquet(full_path)
             interinds = odf.index.intersection(inds)
             interlen = len(interinds)
             if interlen == 0:
+                lock.release()
                 continue
             missdic[full_path] = interlen
-            odf.drop(interinds).pipe(self._write_df_to_path, path=full_path)
+            odf.drop(interinds).pipe(
+                self._write_df_to_path, path=full_path, lock=lock
+            )
 
         self.extend(df, missdic)
 
-    def replace_groups(self, df: Union[pd.DataFrame, dd.DataFrame]):
+    def replace_groups(self, df: Union[pd.DataFrame, "dd.DataFrame"]):
         """replace files based on file name
 
         only viable if `group_cols` is set
@@ -122,9 +171,9 @@ class TableRepo:
         if self.group_cols is None:
             raise TypeError("only works if group cols is set")
 
-        return self._gb_handle(df, "replace_all")
+        return self._gb_handle(df, self.replace_all)
 
-    def replace_all(self, df: Union[pd.DataFrame, dd.DataFrame]):
+    def replace_all(self, df: Union[pd.DataFrame, "dd.DataFrame"]):
         """purges everything and writes df instead"""
         self.purge()
         self.extend(df)
@@ -134,10 +183,18 @@ class TableRepo:
         for p in self._get_pobjs():
             p.unlink()
 
-    def get_full_df(self):
-        return self.get_full_ddf().compute()
+    def get_full_df(self, try_dask=True):
+        if try_dask and (self._client_address is not None):
+            return self.get_full_ddf().compute()
+        return reduce(
+            lambda l, r: l.append(pd.read_parquet(r)),
+            self._get_full_paths(),
+            pd.DataFrame(),
+        )
 
     def get_full_ddf(self):
+        import dask.dataframe as dd
+
         if self.n_files:
             return dd.read_parquet(self._get_full_paths())
         return dd.from_pandas(pd.DataFrame(), npartitions=1)
@@ -171,8 +228,11 @@ class TableRepo:
         for path in self.paths:
             return _parse_metadata(pq.read_schema(path).metadata)
 
-    def _write_df_to_path(self, df, path):
+    def _write_df_to_path(self, df, path, lock: Optional[Lock] = None):
+        """if lock is given, it should already be acquired"""
         table = pa.Table.from_pandas(df)
+        if lock is None:
+            lock = self._locks.acquire(path)
         pq.write_table(
             table.replace_schema_metadata(
                 {
@@ -182,13 +242,10 @@ class TableRepo:
             ),
             path,
         )
+        lock.release()
 
-    def _extend(self, df, missing_rows_dic):
+    def _extend_parts(self, df, missing_rows_dic):
         start_rec = 0
-        if isinstance(df, dd.DataFrame):
-            df = df.compute()
-            # TODO: this needs to work better
-
         for fpath, missing_n in missing_rows_dic.items():
             end = start_rec + missing_n
             pd.read_parquet(fpath).append(
@@ -222,27 +279,31 @@ class TableRepo:
         return self._get_full_paths()[-1]
 
     def _next_full_path(self):
-        n = self.n_files
         while True:
-            yield _to_full_path(self._root_path / f"file-{n}{EXTENSION}")
-            n += 1
+            fname = "file-{:020d}{}".format(self.n_files + 1, EXTENSION)
+            yield _to_full_path(self._root_path / fname)
 
-    def _gb_handle(self, df: Union[pd.DataFrame, dd.DataFrame], funcname):
+    def _gb_handle(
+        self, df: Union[pd.DataFrame, "dd.DataFrame"], fun, **kwargs
+    ):
         _gb = df.groupby(self.group_cols)
-        if isinstance(df, dd.DataFrame):
-            _gb.apply(self._gapply, funcname, meta=("none", object)).compute()
+        if not isinstance(df, pd.DataFrame):
+            _gb.apply(self._gapply, fun, meta={}, **kwargs).compute()
         else:
-            _gb.apply(self._gapply, funcname)
+            _gb.apply(self._gapply, fun, **kwargs)
 
-    def _gapply(self, gdf, funcname):
+    def _gapply(self, gdf, fun, **kwargs):
         gid = (
             gdf.iloc[[0], :]
-            .reset_index()[self.group_cols]
+            .reset_index()
+            .loc[:, self.group_cols]
             .values[0, :]
             .astype(str)
         )
         gpath = self._path_kls(self._root_path, *gid)
-        getattr(TableRepo(gpath, self.max_records), funcname)(gdf)
+        getattr(TableRepo(gpath, **self._grouped_kwargs), fun.__name__)(
+            gdf, **kwargs
+        )
 
     def _reindex_cols(self, df):
         for p in self.paths:
@@ -273,20 +334,34 @@ class TableRepo:
     def _root_path(self) -> Path:
         return self._current_env_parent / self.name
 
+    @property
+    def _grouped_kwargs(self):
+        return dict(
+            max_records=self.max_records,
+            ensure_same_cols=self._ensure_cols,
+            mkdirs=self._mkdirs,
+            extra_metadata=self.extra_metadata,
+            dask_client_address=self._client_address,
+            lock_store_str=self._lock_store_str,
+        )
+
 
 def _parse_path(path):
     if isinstance(path, str):
-        if path.startswith("s3://"):
-            return S3Path(path[4:])  # pragma: nocover
+        if path.startswith("s3://"):  # pragma: nocover
+            from s3path import S3Path
+
+            return S3Path(path[4:])
         else:
             return Path(path)
     return path
 
 
 def _to_full_path(pobj):
-    if isinstance(pobj, S3Path):
+    try:
+        return pobj.as_posix()
+    except AttributeError:
         return pobj.as_uri()  # pragma: nocover
-    return pobj.as_posix()
 
 
 def _render_metadata(meta_dic):

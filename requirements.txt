@@ -1,6 +1,5 @@
 toml
 pandas
-dask[dataframe]
 pyarrow
-s3path
-s3fs
+atqo>=0.0.8
+filelock
