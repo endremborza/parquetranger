@@ -255,7 +255,7 @@ def test_ddf_gb(tmp_path, recs):
             if recs:
                 pend = (str(gid), "file-{:020d}".format(1))
             gpath = Path(troot, *pend).with_suffix(EXTENSION)
-            assert gdf.equals(pd.read_parquet(gpath))
+            assert gdf.equals(pd.read_parquet(gpath).reindex(gdf.index))
 
 
 def _basetest(trepo: TableRepo):

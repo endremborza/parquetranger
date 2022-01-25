@@ -106,7 +106,7 @@ class TableRepo:
             lock = self._locks.acquire(self.full_path)
             return (
                 self.get_full_df(try_dask=try_dask)
-                .append(df, ignore_index=isinstance(df.index, pd.RangeIndex))
+                .pipe(_append, df)
                 .pipe(self._write_df_to_path, path=self.full_path, lock=lock)
             )
 
@@ -187,7 +187,7 @@ class TableRepo:
         if try_dask and (self._client_address is not None):
             return self.get_full_ddf().compute()
         return reduce(
-            lambda l, r: l.append(pd.read_parquet(r)),
+            _reducer,
             self._get_full_paths(),
             pd.DataFrame(),
         )
@@ -248,10 +248,9 @@ class TableRepo:
         start_rec = 0
         for fpath, missing_n in missing_rows_dic.items():
             end = start_rec + missing_n
-            pd.read_parquet(fpath).append(
-                df.iloc[start_rec:end, :],
-                ignore_index=isinstance(df.index, pd.RangeIndex),
-            ).pipe(self._write_df_to_path, path=fpath)
+            _reducer(df.iloc[start_rec:end, :], fpath).pipe(
+                self._write_df_to_path, path=fpath
+            )
             start_rec = end
         for i, fpath in zip(
             range(start_rec, df.shape[0], self.max_records),
@@ -344,6 +343,16 @@ class TableRepo:
             dask_client_address=self._client_address,
             lock_store_str=self._lock_store_str,
         )
+
+
+def _reducer(left, right):
+    return _append(left, pd.read_parquet(right))
+
+
+def _append(top_df, bot_df):
+    return pd.concat(
+        [top_df, bot_df], ignore_index=isinstance(bot_df.index, pd.RangeIndex)
+    )
 
 
 def _parse_path(path):
