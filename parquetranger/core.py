@@ -334,10 +334,12 @@ class TableRepo:
             lock_store_str=self._lock_store_str,
         )
 
+
 def _get_addr(client_address):
     try:
         import dask.dataframe  # noqa
         from distributed.client import Client, get_client
+
         try:
             client = get_client(client_address)
         except ValueError:
@@ -345,6 +347,7 @@ def _get_addr(client_address):
         return client.scheduler.address
     except ImportError:
         return None
+
 
 def _reducer(left, right):
     return _append(left, pd.read_parquet(right))
