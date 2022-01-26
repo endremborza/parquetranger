@@ -1,5 +1,5 @@
 import json
-from functools import partial, reduce
+from functools import cached_property, partial, reduce
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from threading import Lock
@@ -71,7 +71,7 @@ class TableRepo:
         default_str = f"file://{TemporaryDirectory().name}"  # TODO
         self._lock_store_str = lock_store_str or default_str
         self._locks = get_lock_store(lock_store_str)
-        self._client_address = _get_addr(dask_client_address)
+        self._base_dask_address = dask_client_address
 
     def extend(
         self,
@@ -83,6 +83,7 @@ class TableRepo:
             df = self._reindex_cols(df)
 
         if not isinstance(df, pd.DataFrame):
+            assert self._client_address, f"{type(df)} needs dask"
             return df.map_partitions(
                 self.extend, missdic=missdic, try_dask=False, meta={}
             ).compute()
@@ -281,6 +282,7 @@ class TableRepo:
 
     def _gapply(self, gdf, fun, **kwargs):
         if gdf.empty:
+            # TODO: warn here
             return
         gid = (
             gdf.iloc[[0], :]
@@ -333,6 +335,10 @@ class TableRepo:
             dask_client_address=self._client_address,
             lock_store_str=self._lock_store_str,
         )
+
+    @cached_property
+    def _client_address(self):
+        return _get_addr(self._base_dask_address)
 
 
 def _get_addr(client_address):
