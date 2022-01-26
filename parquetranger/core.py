@@ -71,19 +71,7 @@ class TableRepo:
         default_str = f"file://{TemporaryDirectory().name}"  # TODO
         self._lock_store_str = lock_store_str or default_str
         self._locks = get_lock_store(lock_store_str)
-
-        try:
-            import dask.dataframe  # noqa
-            from distributed.client import Client, get_client
-
-            try:
-                client = get_client(dask_client_address)
-            except ValueError:
-                client = Client()
-            _addr = client.scheduler.address
-        except ImportError:
-            _addr = None
-        self._client_address = _addr
+        self._client_address = _get_addr(dask_client_address)
 
     def extend(
         self,
@@ -292,6 +280,8 @@ class TableRepo:
             _gb.apply(self._gapply, fun, **kwargs)
 
     def _gapply(self, gdf, fun, **kwargs):
+        if gdf.empty:
+            return
         gid = (
             gdf.iloc[[0], :]
             .reset_index()
@@ -344,6 +334,17 @@ class TableRepo:
             lock_store_str=self._lock_store_str,
         )
 
+def _get_addr(client_address):
+    try:
+        import dask.dataframe  # noqa
+        from distributed.client import Client, get_client
+        try:
+            client = get_client(client_address)
+        except ValueError:
+            client = Client()
+        return client.scheduler.address
+    except ImportError:
+        return None
 
 def _reducer(left, right):
     return _append(left, pd.read_parquet(right))

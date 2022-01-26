@@ -258,6 +258,17 @@ def test_ddf_gb(tmp_path, recs):
             assert gdf.equals(pd.read_parquet(gpath).reindex(gdf.index))
 
 
+def test_ddf_empty(tmp_path):
+    troot = tmp_path / "fing"
+    trepo = TableRepo(troot, group_cols="C")
+    ddf = dd.from_pandas(pd.concat([df1, df2]), npartitions=3).loc[
+        lambda df: df["A"] > 4, :
+    ]
+    ddf.pipe(trepo.extend)
+    df = ddf.compute()
+    assert df.equals(trepo.get_full_df().reindex(df.index))
+
+
 def _basetest(trepo: TableRepo):
     base = []
     for _df in [df1, df2]:
