@@ -1,3 +1,4 @@
+from functools import partial
 from itertools import product
 
 import dask.dataframe as dd
@@ -82,3 +83,45 @@ def test_map_partitions_extend(tmp_path):
     ddf = dd.from_pandas(df, npartitions=npartitions)
     trepo1.extend(ddf)
     assert_frame_equal(df, trepo1.get_full_df().sort_index())
+
+
+@pytest.mark.parametrize(
+    ["rowcount", "max_records", "group_cols"],
+    product([10, 100, 1000], [0, 90, 900], ["C", ["C", "G"]]),
+)
+def test_native_map_partitions(tmp_path, rowcount, max_records, group_cols):
+
+    seed = 100
+
+    rng = np.random.RandomState(seed)
+    trepo1 = TableRepo(
+        tmp_path / "d1",
+        group_cols=group_cols,
+        max_records=max_records,
+    )
+
+    trepo2 = TableRepo(
+        tmp_path / "d2",
+    )
+
+    df = pd.DataFrame(
+        {
+            "A": rng.rand(rowcount),
+            "B": rng.rand(rowcount),
+            "C": rng.randint(100, 105, size=rowcount).astype(float),
+            "G": rng.choice(["x", "y", "z"], size=rowcount),
+        },
+        index=pd.Series(range(0, rowcount)).astype(str).str.zfill(10),
+    )
+    trepo1.extend(df)
+    trepo1.map_partitions(partial(_gbmapper, trepo=trepo2, gcols=group_cols))
+    assert_frame_equal(
+        df.groupby(group_cols)[["A", "B"]].mean().reset_index(),
+        trepo2.get_full_df().sort_values(group_cols).reset_index(drop=True),
+    )
+
+
+def _gbmapper(gdf, trepo, gcols):
+    gdf.groupby(gcols)[["A", "B"]].mean().reset_index().pipe(
+        trepo.extend, try_dask=False
+    )

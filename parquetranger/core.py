@@ -1,5 +1,6 @@
 import json
 from functools import cached_property, partial, reduce
+from itertools import groupby
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from threading import Lock
@@ -11,12 +12,15 @@ import pyarrow.parquet as pq
 from atqo import parallel_map
 from atqo.lock_stores import get_lock_store
 
+# from atqo.distributed_apis import ...
+
 if TYPE_CHECKING:
     import dask.dataframe as dd
     from s3path import S3Path
 
 EXTENSION = ".parquet"
 DEFAULT_ENV = "default-env"
+DEFAULT_MULTI_API = "mp"
 _T_JSON_SERIALIZABLE = Union[str, int, list, dict]
 
 
@@ -111,13 +115,39 @@ class TableRepo:
         self._extend_parts(df, missdic)
         extension_lock.release()
 
-    def batch_extend(self, df_iterator, batch_size=20):
-        DEFAULT_MULTI_API = "mp"
+    def batch_extend(
+        self,
+        df_iterator,
+        dist_api=DEFAULT_MULTI_API,
+        batch_size=None,
+        pbar=False,
+        **para_kwargs,
+    ):
+
         parallel_map(
             partial(self.extend, try_dask=False),
             df_iterator,
             batch_size=batch_size,
-            dist_api=DEFAULT_MULTI_API,
+            dist_api=dist_api,
+            pbar=pbar,
+            **para_kwargs,
+        )
+
+    def map_partitions(
+        self,
+        fun,
+        dist_api=DEFAULT_MULTI_API,
+        batch_size=None,
+        pbar=False,
+        **para_kwargs,
+    ):
+        return parallel_map(
+            partial(_map_group, fun=fun),
+            self._gb_paths,
+            batch_size=batch_size,
+            dist_api=dist_api,
+            pbar=pbar,
+            **para_kwargs,
         )
 
     def replace_records(
@@ -261,7 +291,7 @@ class TableRepo:
         return self._root_path.glob("**/*" + EXTENSION)
 
     def _get_full_paths(self):
-        return sorted(map(_to_full_path, self._get_pobjs()))
+        return [*map(_to_full_path, self._sorted_paths)]
 
     def _get_last_full_path(self):
         return self._get_full_paths()[-1]
@@ -321,9 +351,21 @@ class TableRepo:
         if not self._is_single_file:
             self._root_path.mkdir(exist_ok=True)
 
+    def _path_grouper(self, p: Path):
+        return p.relative_to(self._root_path).parts[: len(self.group_cols)]
+
     @property
     def _root_path(self) -> Path:
         return self._current_env_parent / self.name
+
+    @property
+    def _sorted_paths(self):
+        return sorted(self._get_pobjs())
+
+    @property
+    def _gb_paths(self):
+        for _, g in groupby(self._sorted_paths, self._path_grouper):
+            yield list(g)
 
     @property
     def _grouped_kwargs(self):
@@ -363,6 +405,10 @@ def _append(top_df, bot_df):
     return pd.concat(
         [top_df, bot_df], ignore_index=isinstance(bot_df.index, pd.RangeIndex)
     )
+
+
+def _map_group(paths, fun):
+    fun(pd.concat([pd.read_parquet(p) for p in paths]))
 
 
 def _parse_path(path):

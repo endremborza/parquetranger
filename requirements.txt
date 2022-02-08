@@ -1,5 +1,4 @@
 toml
 pandas
 pyarrow
-atqo>=0.0.8
-filelock
+atqo[fancy]>=0.0.10
