@@ -10,8 +10,8 @@ import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
 from atqo import parallel_map
-from atqo.lock_stores import get_lock_store
 from atqo.distributed_apis import DEFAULT_MULTI_API
+from atqo.lock_stores import get_lock_store
 
 if TYPE_CHECKING:
     import dask.dataframe as dd
