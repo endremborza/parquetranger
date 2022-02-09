@@ -1,5 +1,5 @@
 import json
-from functools import cached_property, partial, reduce
+from functools import partial, reduce
 from itertools import groupby
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -48,7 +48,7 @@ class TableRepo:
         env_parents: Optional[Dict[str, Union["S3Path", Path, str]]] = None,
         mkdirs=True,
         extra_metadata: Optional[Dict[str, _T_JSON_SERIALIZABLE]] = None,
-        dask_client_address=None,
+        dask_client_address: Optional[str] = None,
         lock_store_str: Optional[str] = None,
     ):
         self.extra_metadata = extra_metadata or {}
@@ -85,7 +85,7 @@ class TableRepo:
             df = self._reindex_cols(df)
 
         if not isinstance(df, pd.DataFrame):
-            assert self._client_address, f"{type(df)} needs dask"
+            assert self._get_client_address(True), f"{type(df)} needs dask"
             return df.map_partitions(
                 self.extend, missdic=missdic, try_dask=False, meta={}
             ).compute()
@@ -201,7 +201,7 @@ class TableRepo:
             p.unlink()
 
     def get_full_df(self, try_dask=True):
-        if try_dask and (self._client_address is not None):
+        if try_dask and (self._get_client_address(True) is not None):
             return self.get_full_ddf().compute()
         return reduce(
             _reducer,
@@ -352,6 +352,11 @@ class TableRepo:
     def _path_grouper(self, p: Path):
         return p.relative_to(self._root_path).parts[: len(self.group_cols)]
 
+    def _get_client_address(self, force_init: bool):
+        if (self._base_dask_address is None) and force_init:
+            self._base_dask_address = _get_addr()
+        return self._base_dask_address
+
     @property
     def _root_path(self) -> Path:
         return self._current_env_parent / self.name
@@ -372,22 +377,18 @@ class TableRepo:
             ensure_same_cols=self._ensure_cols,
             mkdirs=self._mkdirs,
             extra_metadata=self.extra_metadata,
-            dask_client_address=self._client_address,
+            dask_client_address=self._get_client_address(force_init=False),
             lock_store_str=self._lock_store_str,
         )
 
-    @cached_property
-    def _client_address(self):
-        return _get_addr(self._base_dask_address)
 
-
-def _get_addr(client_address):
+def _get_addr():
     try:
         import dask.dataframe  # noqa
         from distributed.client import Client, get_client
 
         try:
-            client = get_client(client_address)
+            client = get_client()
         except ValueError:
             client = Client()
         return client.scheduler.address
