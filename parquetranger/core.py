@@ -1,4 +1,5 @@
 import json
+from contextlib import contextmanager
 from functools import partial, reduce
 from itertools import groupby
 from pathlib import Path
@@ -57,10 +58,9 @@ class TableRepo:
         self._remake_dirs = mkdirs
 
         _root_path = _parse_path(root_path)
-
-        self._current_env_parent = _root_path.parent
-        self._env_parents[DEFAULT_ENV] = self._current_env_parent
         self.name = _root_path.name
+        self._default_env = self._get_default_env(_root_path)
+        self._current_env = self._default_env
         self._mkdirs()
 
         self.max_records = max_records
@@ -217,11 +217,18 @@ class TableRepo:
         return dd.from_pandas(pd.DataFrame(), npartitions=1)
 
     def set_env(self, env: str):
-        self._current_env_parent = _parse_path(self._env_parents[env])
+        self._current_env = env
         self._mkdirs()
 
     def set_env_to_default(self):
-        self.set_env(DEFAULT_ENV)
+        self.set_env(self._default_env)
+
+    @contextmanager
+    def env_ctx(self, env_name):
+        _base = self._current_env
+        self.set_env(env_name)
+        yield
+        self.set_env(_base)
 
     @property
     def full_path(self):
@@ -244,6 +251,14 @@ class TableRepo:
     def full_metadata(self):
         for path in self.paths:
             return _parse_metadata(pq.read_schema(path).metadata)
+
+    def _get_default_env(self, default_path: Path):
+        def_parent = default_path.parent
+        for env_name, parent in self._env_parents.items():
+            if parent == def_parent:
+                return env_name
+        self._env_parents[DEFAULT_ENV] = def_parent
+        return DEFAULT_ENV
 
     def _write_df_to_path(self, df, path, lock: Optional[Lock] = None):
         """if lock is given, it should already be acquired"""
@@ -360,6 +375,10 @@ class TableRepo:
     @property
     def _root_path(self) -> Path:
         return self._current_env_parent / self.name
+
+    @property
+    def _current_env_parent(self) -> Path:
+        return _parse_path(self._env_parents[self._current_env])
 
     @property
     def _sorted_paths(self):
