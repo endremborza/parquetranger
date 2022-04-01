@@ -1,0 +1,7 @@
+
+
+API
+===
+
+.. automodapi:: parquetranger
+
