@@ -1,2 +1,5 @@
-from ._version import __version__  # noqa: F401
+"""Read and write parquet files"""
+
 from .core import TableRepo  # noqa: F401
+
+__version__ = "0.2.0"

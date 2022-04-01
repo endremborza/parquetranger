@@ -1,4 +1,0 @@
-toml
-pandas
-pyarrow
-atqo[fancy]>=0.0.10

@@ -5,4 +5,3 @@
 [![codecov](https://img.shields.io/codecov/c/github/endremborza/parquetranger)](https://codecov.io/gh/endremborza/parquetranger)
 [![pypi](https://img.shields.io/pypi/v/parquetranger.svg)](https://pypi.org/project/parquetranger/)
 
-add keywords to pyproject.toml

@@ -1,13 +1,12 @@
-
 Welcome to parquetranger's documentation!
 =====================================================================================
 
 .. toctree::
    :maxdepth: 2
    :caption: Contents:
+   :glob:
 
-   notebooks/doc-000-intro
-   notebooks/doc-001-quickstart
+   notebooks/*
    autosumm
    release_notes/main
 
