@@ -17,9 +17,7 @@ def test_diff_cols(tmp_path, indices):
     _df1 = pd.DataFrame({"A": [1, 2], "C": ["g1", "g1"]}, index=indices)
     _df2 = pd.DataFrame({"B": [1, 2], "C": ["g2", "g2"]}, index=indices)
 
-    trepo = TableRepo(
-        tmp_path / "diffcols", group_cols="C", ensure_same_cols=True
-    )
+    trepo = TableRepo(tmp_path / "diffcols", group_cols="C", ensure_same_cols=True)
     trepo.extend(_df1)
     trepo.extend(_df2)
 
@@ -32,9 +30,7 @@ def test_diff_schema(tmp_path):
     _df1 = pd.DataFrame({"A": [1, 2], "C": ["g1", "g1"]})
     _df2 = pd.DataFrame({"A": [1.2, 2.2], "C": ["g2", "g2"]})
 
-    trepo = TableRepo(
-        tmp_path / "diffcols", group_cols="C", ensure_same_cols=True
-    )
+    trepo = TableRepo(tmp_path / "diffcols", group_cols="C", ensure_same_cols=True)
     trepo.extend(_df1)
     trepo.extend(_df2)
 

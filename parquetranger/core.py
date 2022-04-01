@@ -64,9 +64,7 @@ class TableRepo:
         self._mkdirs()
 
         self.max_records = max_records
-        self.group_cols = (
-            [group_cols] if isinstance(group_cols, str) else group_cols
-        )
+        self.group_cols = [group_cols] if isinstance(group_cols, str) else group_cols
         self._path_kls = type(self._root_path)
 
         self._ensure_cols = ensure_same_cols
@@ -101,9 +99,7 @@ class TableRepo:
                 .pipe(self._write_df_to_path, path=self.full_path, lock=lock)
             )
 
-        extension_lock = self._locks.acquire(
-            f"{_to_full_path(self._root_path)} - ext"
-        )
+        extension_lock = self._locks.acquire(f"{_to_full_path(self._root_path)} - ext")
         missdic = missdic or {}
         if self.n_files:
             last_path = self._get_last_full_path()
@@ -148,9 +144,7 @@ class TableRepo:
             **para_kwargs,
         )
 
-    def replace_records(
-        self, df: Union[pd.DataFrame, "dd.DataFrame"], by_groups=False
-    ):
+    def replace_records(self, df: Union[pd.DataFrame, "dd.DataFrame"], by_groups=False):
         """replace records in files based on index"""
         if by_groups:
             if self.group_cols is None:
@@ -174,9 +168,7 @@ class TableRepo:
                 lock.release()
                 continue
             missdic[full_path] = interlen
-            odf.drop(interinds).pipe(
-                self._write_df_to_path, path=full_path, lock=lock
-            )
+            odf.drop(interinds).pipe(self._write_df_to_path, path=full_path, lock=lock)
 
         self.extend(df, missdic)
 
@@ -314,9 +306,7 @@ class TableRepo:
             fname = "file-{:020d}{}".format(self.n_files + 1, EXTENSION)
             yield _to_full_path(self._root_path / fname)
 
-    def _gb_handle(
-        self, df: Union[pd.DataFrame, "dd.DataFrame"], fun, **kwargs
-    ):
+    def _gb_handle(self, df: Union[pd.DataFrame, "dd.DataFrame"], fun, **kwargs):
         _gb = df.groupby(self.group_cols)
         if not isinstance(df, pd.DataFrame):
             _gb.apply(self._gapply, fun, meta={}, **kwargs).compute()
@@ -335,9 +325,7 @@ class TableRepo:
             .astype(str)
         )
         gpath = self._path_kls(self._root_path, *gid)
-        getattr(TableRepo(gpath, **self._grouped_kwargs), fun.__name__)(
-            gdf, **kwargs
-        )
+        getattr(TableRepo(gpath, **self._grouped_kwargs), fun.__name__)(gdf, **kwargs)
 
     def _reindex_cols(self, df):
         for p in self.paths:

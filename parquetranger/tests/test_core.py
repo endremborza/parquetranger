@@ -226,10 +226,7 @@ def test_ddf(tmp_path, max_recs, partitions):
         full_df = trepo.get_full_df()
         assert conc.reindex(full_df.index).equals(full_df)
         assert (
-            dd.read_parquet(trepo.full_path)
-            .compute()
-            .reindex(conc.index)
-            .equals(conc)
+            dd.read_parquet(trepo.full_path).compute().reindex(conc.index).equals(conc)
         )
 
 
