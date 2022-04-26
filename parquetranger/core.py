@@ -414,7 +414,7 @@ def _append(top_df, bot_df):
 
 
 def _map_group(paths, fun):
-    fun(pd.concat([pd.read_parquet(p) for p in paths]))
+    return fun(pd.concat([pd.read_parquet(p) for p in paths]))
 
 
 def _parse_path(path):
