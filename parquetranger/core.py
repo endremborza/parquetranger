@@ -77,7 +77,7 @@ class TableRepo:
         self,
         df: Union[pd.DataFrame, "dd.DataFrame"],
         missdic=None,
-        try_dask=True,
+        try_dask=False,
     ):
         if self._ensure_cols:
             df = self._reindex_cols(df)
@@ -192,7 +192,7 @@ class TableRepo:
         for p in self._get_pobjs():
             p.unlink()
 
-    def get_full_df(self, try_dask=True):
+    def get_full_df(self, try_dask=False):
         if try_dask and (self._get_client_address(True) is not None):
             return self.get_full_ddf().compute()
         return reduce(
