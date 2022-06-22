@@ -25,6 +25,7 @@ TableRepo
       ~TableRepo.extend
       ~TableRepo.get_full_ddf
       ~TableRepo.get_full_df
+      ~TableRepo.get_partition_paths
       ~TableRepo.map_partitions
       ~TableRepo.purge
       ~TableRepo.replace_all
@@ -48,6 +49,7 @@ TableRepo
    .. automethod:: extend
    .. automethod:: get_full_ddf
    .. automethod:: get_full_df
+   .. automethod:: get_partition_paths
    .. automethod:: map_partitions
    .. automethod:: purge
    .. automethod:: replace_all
