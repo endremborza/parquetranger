@@ -12,7 +12,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-test = ["branthebuilder", "moto"]
+test = ["branthebuilder"]
 doc = [
     "sphinx",
     "pandoc",
