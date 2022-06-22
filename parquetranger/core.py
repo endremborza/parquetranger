@@ -208,6 +208,20 @@ class TableRepo:
             return dd.read_parquet(self._get_full_paths())
         return dd.from_pandas(pd.DataFrame(), npartitions=1)
 
+    def get_partition_paths(self, partition_col):
+        part_ind = self.group_cols.index(partition_col)
+        path_indexer = part_ind - len(self.group_cols)
+        if self.max_records:
+            path_indexer -= 1
+
+        def _getkey(path):
+            return Path(path).parts[path_indexer]
+
+        for gid, paths in groupby(sorted(self.paths, key=_getkey), _getkey):
+            if path_indexer == -1:
+                gid = gid.replace(EXTENSION, "")
+            yield gid, list(paths)
+
     def set_env(self, env: str):
         self._current_env = env
         self._mkdirs()

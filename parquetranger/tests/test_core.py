@@ -1,9 +1,9 @@
+from itertools import product
 from pathlib import Path
 
 import dask.dataframe as dd
 import pandas as pd
 import pytest
-from moto import mock_s3
 
 from parquetranger import TableRepo
 from parquetranger.core import EXTENSION
@@ -195,19 +195,6 @@ def test_strin(tmp_path):
 
 
 @pytest.mark.parametrize(
-    ["s3_loc", "recs"],
-    [
-        ("s3://borza-test-bucket-1/data", 0),
-        ("s3://borza-test-bucket-1/subfing/data", 0),
-        ("s3://borza-test-bucket-1/subfing/data", 3),
-    ],
-)
-@mock_s3
-def notyet_test_s3(s3_loc, recs):
-    _basetest(TableRepo(s3_loc, recs))
-
-
-@pytest.mark.parametrize(
     ["max_recs", "partitions"],
     [
         (1, 1),
@@ -264,6 +251,26 @@ def test_ddf_empty(tmp_path):
     ddf.pipe(trepo.extend)
     df = ddf.compute()
     assert df.equals(trepo.get_full_df().reindex(df.index))
+
+
+@pytest.mark.parametrize(
+    ["gcols", "max_records"],
+    [*product([None, "C", ["C", "C2"], ["C2", "C"], "C2"], [0, 1])],
+)
+def test_part_paths(tmp_path, gcols, max_records):
+    troot = tmp_path / "tab"
+    trepo = TableRepo(troot, group_cols=gcols, max_records=max_records)
+    trepo.extend(df1)
+    if gcols is None:
+        with pytest.raises(AttributeError):
+            [*trepo.get_partition_paths("C")]
+        return
+
+    for part_col in gcols if isinstance(gcols, list) else [gcols]:
+        gb_dic = {str(gid): gdf for gid, gdf in df1.groupby(part_col)}
+        for gid, gpaths in trepo.get_partition_paths(part_col):
+            gdf = dd.read_parquet(gpaths).compute()
+            assert gdf.equals(gb_dic[gid])
 
 
 def _basetest(trepo: TableRepo):
