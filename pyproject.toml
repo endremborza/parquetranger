@@ -4,11 +4,11 @@ dynamic = ["version", "description"]
 authors = [{name = "Endre Márk Borza", email = "endremborza@gmail.com"}]
 license = {file = "LICENSE"}
 readme = "README.md"
-requires-python = ">=3.8"
+requires-python = ">=3.10"
 dependencies = [
     "pandas",
     "pyarrow",
-    "atqo[fancy]>=0.1.0"
+    "atqo>=0.2.2",
 ]
 
 [project.optional-dependencies]
