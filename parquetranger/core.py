@@ -3,16 +3,13 @@ from contextlib import contextmanager
 from functools import partial, reduce
 from itertools import groupby
 from pathlib import Path
-from tempfile import TemporaryDirectory
 from threading import Lock
 from typing import TYPE_CHECKING, Dict, Optional, Union
 
 import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
-from atqo import parallel_map
-from atqo.distributed_apis import DEFAULT_MULTI_API
-from atqo.lock_stores import get_lock_store
+from atqo import DEFAULT_MULTI_API, acquire_lock, parallel_map
 
 if TYPE_CHECKING:
     import dask.dataframe as dd
@@ -50,7 +47,6 @@ class TableRepo:
         mkdirs=True,
         extra_metadata: Optional[Dict[str, _T_JSON_SERIALIZABLE]] = None,
         dask_client_address: Optional[str] = None,
-        lock_store_str: Optional[str] = None,
     ):
         self.extra_metadata = extra_metadata or {}
         self._env_parents = env_parents or {}
@@ -68,9 +64,6 @@ class TableRepo:
         self._path_kls = type(self._root_path)
 
         self._ensure_cols = ensure_same_cols
-        default_str = f"file://{TemporaryDirectory().name}"  # TODO
-        self._lock_store_str = lock_store_str or default_str
-        self._locks = get_lock_store(lock_store_str)
         self._base_dask_address = dask_client_address
 
     def extend(
@@ -92,14 +85,14 @@ class TableRepo:
             return self._gb_handle(df, self.extend, try_dask=try_dask)
 
         if self.max_records == 0:
-            lock = self._locks.acquire(self.full_path)
+            lock = self._acquire_lock(self.full_path)
             return (
                 self.get_full_df(try_dask=try_dask)
                 .pipe(_append, df)
                 .pipe(self._write_df_to_path, path=self.full_path, lock=lock)
             )
 
-        extension_lock = self._locks.acquire(f"{_to_full_path(self._root_path)} - ext")
+        extension_lock = self._acquire_lock(f"{_to_full_path(self._root_path)} - ext")
         missdic = missdic or {}
         if self.n_files:
             last_path = self._get_last_full_path()
@@ -160,7 +153,7 @@ class TableRepo:
 
         missdic = {}
         for full_path in self._get_full_paths():
-            lock = self._locks.acquire(full_path)
+            lock = self._acquire_lock(full_path)
             odf = pd.read_parquet(full_path)
             interinds = odf.index.intersection(inds)
             interlen = len(interinds)
@@ -270,7 +263,7 @@ class TableRepo:
         """if lock is given, it should already be acquired"""
         table = pa.Table.from_pandas(df)
         if lock is None:
-            lock = self._locks.acquire(path)
+            lock = self._acquire_lock(path)
         pq.write_table(
             table.replace_schema_metadata(
                 {
@@ -374,6 +367,16 @@ class TableRepo:
             self._base_dask_address = _get_addr()
         return self._base_dask_address
 
+    def _acquire_lock(self, key):
+        if self._base_dask_address is None:
+            return acquire_lock(key)
+        from distributed.client import Client
+        from distributed.lock import Lock
+
+        lock = Lock(name=key, client=Client(self._base_dask_address))
+        lock.acquire()
+        return lock
+
     @property
     def _root_path(self) -> Path:
         return self._current_env_parent / self.name
@@ -399,7 +402,6 @@ class TableRepo:
             mkdirs=self._mkdirs,
             extra_metadata=self.extra_metadata,
             dask_client_address=self._get_client_address(force_init=False),
-            lock_store_str=self._lock_store_str,
         )
 
 

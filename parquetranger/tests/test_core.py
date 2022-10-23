@@ -128,7 +128,7 @@ def test_replace_records(tmp_path, max_records, n_files):
     trepo.replace_records(df4)
 
     full_df = trepo.get_full_df()
-    new_df = df2.drop(df4.index, errors="ignore").append(df4)
+    new_df = pd.concat([df2.drop(df4.index, errors="ignore"), df4])
     assert new_df.reindex(full_df.index).equals(full_df)
     assert trepo.n_files == n_files
 

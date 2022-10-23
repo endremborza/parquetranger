@@ -12,7 +12,7 @@ from parquetranger import TableRepo
 
 @pytest.mark.parametrize(
     ["seed", "batches", "rowcount", "max_records", "group_cols"],
-    product([2, 3], [5, 10, 50], [10, 100, 1000], [0, 90, 900], [None, "C"]),
+    product([742], [5, 20], [10, 100], [0, 90], [None, "C"]),
 )
 def test_para_extend(
     tmp_path, seed, batches, rowcount, max_records, group_cols, dask_client
