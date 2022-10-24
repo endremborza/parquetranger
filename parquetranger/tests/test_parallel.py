@@ -14,7 +14,7 @@ from parquetranger import TableRepo
     ["seed", "batches", "rowcount", "max_records", "group_cols"],
     product([742], [5, 20], [10, 100], [0, 90], [None, "C"]),
 )
-def test_para_extend(
+def drop_test_para_extend(
     tmp_path, seed, batches, rowcount, max_records, group_cols, dask_client
 ):
     rng = np.random.RandomState(seed)
@@ -55,7 +55,7 @@ def test_para_extend(
         assert_frame_equal(test_df, trepo2.get_full_df().pipe(_fit))
 
 
-def test_map_partitions_extend(tmp_path):
+def drop_test_map_partitions_extend(tmp_path):
 
     seed = 100
     rowcount = 10_000
