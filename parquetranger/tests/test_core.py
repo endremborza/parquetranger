@@ -1,7 +1,6 @@
 from itertools import product
 from pathlib import Path
 
-import dask.dataframe as dd
 import pandas as pd
 import pytest
 
@@ -79,9 +78,9 @@ def test_gb_maxrecs(tmp_path):
     troot = tmp_path / "data"
     trepo = TableRepo(troot, group_cols="C2", max_records=2)
     trepo.extend(df1)
-    assert len(trepo.paths) == 2
+    assert trepo.n_files == 2
     trepo.extend(df2)
-    assert len(trepo.paths) == 4
+    assert trepo.n_files == 4
     full_df = trepo.get_full_df()
     assert pd.concat([df1, df2]).reindex(full_df.index).equals(full_df)
 
@@ -140,7 +139,7 @@ def test_replace_records(tmp_path, max_records, n_files):
     assert full_df.shape[0] == trepo.get_full_df().shape[0]
 
 
-def test_gb_replace(tmp_path, dask_client):
+def test_gb_replace(tmp_path):
 
     _df1 = pd.DataFrame(
         {
@@ -163,22 +162,15 @@ def test_gb_replace(tmp_path, dask_client):
         index=["x1", "x2", "y1", "y2"],
     )
 
-    trepo = TableRepo(
-        tmp_path,
-        group_cols="B",
-        dask_client_address=dask_client.scheduler.address,
-    )
+    trepo = TableRepo(tmp_path, group_cols="B")
     trepo.replace_records(_df1)
-    assert _df1.equals(trepo.get_full_df())
+    assert _df1.equals(trepo.get_full_df().sort_index())
 
     trepo.replace_records(_df2, by_groups=True)
     assert _mdf.equals(trepo.get_full_df().sort_index())
 
     trepo.replace_groups(_df1)
     assert _df1.equals(trepo.get_full_df().sort_index())
-
-    trepo.replace_records(dd.from_pandas(_df2, npartitions=1))
-    assert _mdf.equals(trepo.get_full_df().sort_index())
 
 
 def test_bygroups_error(tmp_path):
@@ -192,65 +184,6 @@ def test_bygroups_error(tmp_path):
 
 def test_strin(tmp_path):
     _basetest(TableRepo(str(tmp_path / "data" / "subdir")))
-
-
-@pytest.mark.parametrize(
-    ["max_recs", "partitions"],
-    [
-        (1, 1),
-        (0, 2),
-        (1, 2),
-        (0, 1),
-    ],
-)
-def test_ddf(tmp_path, max_recs, partitions):
-    base = []
-    trepo = TableRepo(tmp_path / "data", max_recs)
-    for _df in [df1, df2]:
-        trepo.extend(dd.from_pandas(_df, npartitions=partitions))
-        base.append(_df)
-        conc = pd.concat(base)
-        full_df = trepo.get_full_df()
-        assert conc.reindex(full_df.index).equals(full_df)
-        assert (
-            dd.read_parquet(trepo.full_path).compute().reindex(conc.index).equals(conc)
-        )
-
-
-@pytest.mark.parametrize(
-    ["recs"],
-    [
-        (10,),
-        (0,),
-    ],
-)
-def test_ddf_gb(tmp_path, recs):
-    base = []
-    troot = tmp_path / "fing"
-    trepo = TableRepo(troot, recs, group_cols="C")
-    for _df in [df1, df2]:
-        trepo.extend(dd.from_pandas(_df, npartitions=1))
-        base.append(_df)
-        conc = pd.concat(base)
-        full_df = trepo.get_full_df()
-        assert conc.reindex(full_df.index).equals(full_df)
-        for gid, gdf in pd.concat(base).groupby("C"):
-            pend = (str(gid),)
-            if recs:
-                pend = (str(gid), "file-{:020d}".format(1))
-            gpath = Path(troot, *pend).with_suffix(EXTENSION)
-            assert gdf.equals(pd.read_parquet(gpath).reindex(gdf.index))
-
-
-def test_ddf_empty(tmp_path):
-    troot = tmp_path / "fing"
-    trepo = TableRepo(troot, group_cols="C")
-    ddf = dd.from_pandas(pd.concat([df1, df2]), npartitions=3).loc[
-        lambda df: df["A"] > 4, :
-    ]
-    ddf.pipe(trepo.extend)
-    df = ddf.compute()
-    assert df.equals(trepo.get_full_df().reindex(df.index))
 
 
 @pytest.mark.parametrize(
@@ -269,8 +202,15 @@ def test_part_paths(tmp_path, gcols, max_records):
     for part_col in gcols if isinstance(gcols, list) else [gcols]:
         gb_dic = {str(gid): gdf for gid, gdf in df1.groupby(part_col)}
         for gid, gpaths in trepo.get_partition_paths(part_col):
-            gdf = dd.read_parquet(gpaths).compute()
-            assert gdf.equals(gb_dic[gid])
+            gdf = pd.concat(map(pd.read_parquet, gpaths))
+            assert gdf.equals(gb_dic[gid].reindex(gdf.index))
+
+
+def test_cat_gb(tmp_path):
+    trepo = TableRepo(tmp_path / "d", group_cols=["C"])
+    trepo.extend(
+        pd.DataFrame({"C": pd.Categorical(["A", "B", "A"], categories=list("ABC"))})
+    )
 
 
 def _basetest(trepo: TableRepo):
