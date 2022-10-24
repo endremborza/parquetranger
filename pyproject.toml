@@ -24,11 +24,6 @@ doc = [
     "jupyter",
     "toml"
 ]
-dask = [
-    "dask[dataframe]",
-    "distributed",
-    "s3path>=0.3.3"
-]
 
 [project.urls]
 Homepage = "https://github.com/endremborza/parquetranger"
