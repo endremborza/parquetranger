@@ -4,6 +4,7 @@ from itertools import product
 import numpy as np
 import pandas as pd
 import pytest
+from atqo import DEFAULT_DIST_API_KEY
 from pandas.testing import assert_frame_equal
 
 from parquetranger import TableRepo
@@ -72,5 +73,12 @@ def test_native_map_partitions(tmp_path, rowcount, max_records, group_cols):
     )
 
 
-def _gbmapper(gdf, trepo, gcols):
+def test_sync_map(tmp_path):
+    trepo = TableRepo(tmp_path / "d", group_cols=["A"])
+    trepo.extend(pd.DataFrame({"A": [1, 2, 1]}))
+    shapes = trepo.map_partitions(len, dist_api=DEFAULT_DIST_API_KEY)
+    assert set(shapes) == {1, 2}
+
+
+def _gbmapper(gdf, trepo, gcols):  # pragma: no cover
     gdf.groupby(gcols)[["A", "B"]].mean().reset_index().pipe(trepo.extend)

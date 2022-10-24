@@ -206,6 +206,13 @@ def test_part_paths(tmp_path, gcols, max_records):
             assert gdf.equals(gb_dic[gid].reindex(gdf.index))
 
 
+def test_cat_gb(tmp_path):
+    trepo = TableRepo(tmp_path / "d", group_cols=["C"])
+    trepo.extend(
+        pd.DataFrame({"C": pd.Categorical(["A", "B", "A"], categories=list("ABC"))})
+    )
+
+
 def _basetest(trepo: TableRepo):
     base = []
     for _df in [df1, df2]:

@@ -253,8 +253,8 @@ class TableRepo:
             # FIXME: isnt iloc inclusive?
             df.iloc[i:end, :].pipe(self._write_df_to_path, path=new_path)
 
-    def _gb_handle(self, df: pd.DataFrame, fun, **kwargs):
-        df.groupby(self.group_cols).apply(self._gapply, fun, **kwargs)
+    def _gb_handle(self, df: pd.DataFrame, fun):
+        df.groupby(self.group_cols).apply(self._gapply, fun)
 
     def _gapply(self, gdf: pd.DataFrame, fun, **kwargs):
         if gdf.empty:
