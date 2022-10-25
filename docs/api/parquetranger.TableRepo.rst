@@ -15,6 +15,7 @@ TableRepo
       ~TableRepo.main_path
       ~TableRepo.n_files
       ~TableRepo.paths
+      ~TableRepo.vc_path
 
    .. rubric:: Methods Summary
 
@@ -40,6 +41,7 @@ TableRepo
    .. autoattribute:: main_path
    .. autoattribute:: n_files
    .. autoattribute:: paths
+   .. autoattribute:: vc_path
 
    .. rubric:: Methods Documentation
 
