@@ -188,7 +188,8 @@ class TableRepo:
 
     @property
     def vc_path(self) -> Path:
-        return self.main_path if (self.max_records > 0) else self._df_path
+        multi_file = (self.max_records > 0) or self.group_cols
+        return self.main_path if multi_file else self._df_path
 
     @property
     def paths(self) -> Iterable[Path]:
