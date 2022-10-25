@@ -49,9 +49,11 @@ class TableRepo:
         self._remake_dirs = mkdirs
         self._ensure_cols = ensure_same_cols
 
-        _root_path = Path(root_path)
-        self.name = _root_path.name
-        self._default_env = self._get_default_env(_root_path)
+        _rp = Path(root_path)
+        self.name = _rp.name
+        _default_kv = filter(lambda kv: kv[1] == _rp.parent, self._env_parents.items())
+        self._default_env, e_path = [*_default_kv, (DEFAULT_ENV, _rp.parent)][0]
+        self._env_parents[self._default_env] = e_path
         self._current_env = self._default_env
 
         self.max_records = max_records
@@ -185,6 +187,10 @@ class TableRepo:
         return self._current_env_parent / self.name
 
     @property
+    def vc_path(self) -> Path:
+        return self.main_path if (self.max_records > 0) else self._df_path
+
+    @property
     def paths(self) -> Iterable[Path]:
         if self._is_single_file:
             return iter([self._df_path] if self._df_path.exists() else [])
@@ -203,14 +209,6 @@ class TableRepo:
     def full_metadata(self):
         for path in self.paths:
             return _parse_metadata(pq.read_schema(path).metadata)
-
-    def _get_default_env(self, default_path: Path):
-        def_parent = default_path.parent
-        for env_name, parent in self._env_parents.items():
-            if parent == def_parent:
-                return env_name
-        self._env_parents[DEFAULT_ENV] = def_parent
-        return DEFAULT_ENV
 
     def _write_df_to_path(self, df, path, lock: Optional[Lock] = None):
         """if lock is given, it should already be acquired"""
