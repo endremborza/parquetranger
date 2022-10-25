@@ -545,4 +545,3 @@ Quickstart
 .. code:: ipython3
 
     trepo.purge()  # deletes everything
-

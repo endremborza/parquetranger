@@ -12,7 +12,7 @@ TableRepo
 
       ~TableRepo.dfs
       ~TableRepo.full_metadata
-      ~TableRepo.full_path
+      ~TableRepo.main_path
       ~TableRepo.n_files
       ~TableRepo.paths
 
@@ -23,7 +23,6 @@ TableRepo
       ~TableRepo.batch_extend
       ~TableRepo.env_ctx
       ~TableRepo.extend
-      ~TableRepo.get_full_ddf
       ~TableRepo.get_full_df
       ~TableRepo.get_partition_paths
       ~TableRepo.map_partitions
@@ -38,7 +37,7 @@ TableRepo
 
    .. autoattribute:: dfs
    .. autoattribute:: full_metadata
-   .. autoattribute:: full_path
+   .. autoattribute:: main_path
    .. autoattribute:: n_files
    .. autoattribute:: paths
 
@@ -47,7 +46,6 @@ TableRepo
    .. automethod:: batch_extend
    .. automethod:: env_ctx
    .. automethod:: extend
-   .. automethod:: get_full_ddf
    .. automethod:: get_full_df
    .. automethod:: get_partition_paths
    .. automethod:: map_partitions
