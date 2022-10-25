@@ -9,7 +9,7 @@ from typing import Dict, Iterable, Optional, Union
 import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
-from atqo import DEFAULT_MULTI_API, acquire_lock, parallel_map
+from atqo import DEFAULT_MULTI_API, acquire_lock, get_lock, parallel_map
 
 EXTENSION = ".parquet"
 DEFAULT_ENV = "default-env"
@@ -59,7 +59,7 @@ class TableRepo:
 
         self._mkdirs()
 
-    def extend(self, df: pd.DataFrame, missdic=None):
+    def extend(self, df: pd.DataFrame):
         if self._ensure_cols:
             df = self._reindex_cols(df)
 
@@ -74,15 +74,8 @@ class TableRepo:
                 .pipe(self._write_df_to_path, path=self._df_path, lock=lock)
             )
 
-        extension_lock = acquire_lock(f"{self.main_path} - ext")
-        missdic = missdic or {}
-        if self.n_files:
-            last_path = self._sorted_paths[-1]
-            missing = self.max_records - pd.read_parquet(last_path).shape[0]
-            if missing > 0:
-                missdic[last_path] = missing
-        self._extend_parts(df, missdic)
-        extension_lock.release()
+        with get_lock(f"{self.main_path} - ext"):
+            self._extend_parts(df)
 
     def batch_extend(
         self,
@@ -92,7 +85,6 @@ class TableRepo:
         pbar=False,
         **para_kwargs,
     ):
-
         parallel_map(
             self.extend,
             df_iterator,
@@ -110,9 +102,12 @@ class TableRepo:
         pbar=False,
         **para_kwargs,
     ):
+        def _path_grouper(p: Path):
+            return p.relative_to(self.main_path).parts[: len(self.group_cols)]
+
         return parallel_map(
             partial(_map_group, fun=fun),
-            self._gb_paths,
+            map(lambda t: list(t[1]), groupby(self._sorted_paths, _path_grouper)),
             batch_size=batch_size,
             dist_api=dist_api,
             pbar=pbar,
@@ -122,35 +117,26 @@ class TableRepo:
     def replace_records(self, df: pd.DataFrame, by_groups=False):
         """replace records in files based on index"""
         if by_groups:
-            if self.group_cols is None:
-                raise TypeError("only works if group cols is set")
             return self._gb_handle(df, self.replace_records)
 
-        inds = df.index
-        df = df.loc[~inds.duplicated(keep="first"), :]
+        df = df.loc[~df.index.duplicated(keep="first"), :]
 
-        missdic = {}
         for full_path in self.paths:
             lock = acquire_lock(full_path)
             odf = pd.read_parquet(full_path)
-            interinds = odf.index.intersection(inds)
-            interlen = len(interinds)
-            if interlen == 0:
+            inter_ind = odf.index.intersection(df.index)
+            if len(inter_ind) == 0:
                 lock.release()
                 continue
-            missdic[full_path] = interlen
-            odf.drop(interinds).pipe(self._write_df_to_path, path=full_path, lock=lock)
+            odf.loc[inter_ind, :] = df.loc[inter_ind, :]
+            self._write_df_to_path(odf, path=full_path, lock=lock)
+            df = df.drop(inter_ind)
 
-        self.extend(df, missdic)
+        if not df.empty:
+            self.extend(df)
 
     def replace_groups(self, df: pd.DataFrame):
-        """replace files based on file name
-
-        only viable if `group_cols` is set
-        """
-        if self.group_cols is None:
-            raise TypeError("only works if group cols is set")
-
+        """replace files based on file name, only viable if `group_cols` is set"""
         return self._gb_handle(df, self.replace_all)
 
     def replace_all(self, df: pd.DataFrame):
@@ -164,13 +150,9 @@ class TableRepo:
             p.unlink()
 
     def get_full_df(self):
-        return reduce(
-            _reducer,
-            self.paths,
-            pd.DataFrame(),
-        )
+        return reduce(_reducer, self.paths, pd.DataFrame())
 
-    def get_partition_paths(self, partition_col):
+    def get_partition_paths(self, partition_col: str):
         part_ind = self.group_cols.index(partition_col)
         path_indexer = part_ind - len(self.group_cols)
         if self.max_records:
@@ -205,16 +187,16 @@ class TableRepo:
     @property
     def paths(self) -> Iterable[Path]:
         if self._is_single_file:
-            return [self._df_path] if self._df_path.exists() else []
+            return iter([self._df_path] if self._df_path.exists() else [])
 
         return self.main_path.glob("**/*" + EXTENSION)
 
     @property
-    def n_files(self):
+    def n_files(self) -> int:
         return len(list(self.paths))
 
     @property
-    def dfs(self):
+    def dfs(self) -> Iterable[pd.DataFrame]:
         return map(pd.read_parquet, self.paths)
 
     @property
@@ -239,14 +221,16 @@ class TableRepo:
         pq.write_table(table.replace_schema_metadata(new_meta), path)
         lock.release()
 
-    def _extend_parts(self, df, missing_rows_dic):
+    def _extend_parts(self, df: pd.DataFrame):
         start_rec = 0
-        for fpath, missing_n in missing_rows_dic.items():
-            end = start_rec + missing_n
-            _reducer(df.iloc[start_rec:end, :], fpath).pipe(
-                self._write_df_to_path, path=fpath
-            )
-            start_rec = end
+        if self.n_files:
+            last_path = self._sorted_paths[-1]
+            missing = self.max_records - pd.read_parquet(last_path).shape[0]
+            if missing > 0:
+                start_rec = missing
+                ext_df = _reducer(df.iloc[:missing, :], last_path)
+                self._write_df_to_path(ext_df, path=last_path)
+
         for i in range(start_rec, df.shape[0], self.max_records):
             new_path = self.main_path / f"file-{self.n_files:020d}{EXTENSION}"
             end = i + self.max_records
@@ -254,38 +238,43 @@ class TableRepo:
             df.iloc[i:end, :].pipe(self._write_df_to_path, path=new_path)
 
     def _gb_handle(self, df: pd.DataFrame, fun):
+        if self.group_cols is None:
+            raise TypeError("only works if group cols is set")
+
         df.groupby(self.group_cols).apply(self._gapply, fun)
 
-    def _gapply(self, gdf: pd.DataFrame, fun, **kwargs):
+    def _gapply(self, gdf: pd.DataFrame, fun):
         if gdf.empty:
             # TODO: warn here
             return
-        gid = (
-            gdf.iloc[[0], :]
-            .reset_index()
-            .loc[:, self.group_cols]
-            .values[0, :]
-            .astype(str)
+        gid = gdf.iloc[[0], :].reset_index().loc[:, self.group_cols].values[0, :]
+        gb_kwargs = dict(
+            max_records=self.max_records,
+            ensure_same_cols=self._ensure_cols,
+            mkdirs=self._remake_dirs,
+            extra_metadata=self.extra_metadata,
         )
-        gpath = Path(self.main_path, *gid)
-        getattr(TableRepo(gpath, **self._grouped_kwargs), fun.__name__)(gdf, **kwargs)
+        gpath = Path(self.main_path, *gid.astype(str))
+        getattr(TableRepo(gpath, **gb_kwargs), fun.__name__)(gdf)
 
     def _reindex_cols(self, df):
-        for p in self.paths:
-            cols = [
-                c
-                for c in pq.read_schema(p).names
-                if not (c.startswith("__index") or c in df.index.names)
-            ]
-            union = df.columns.union(cols)
-            if union.difference(cols).shape[0]:
-                for reinp in self.paths:
-                    self._write_df_to_path(
-                        pd.read_parquet(reinp).reindex(union, axis=1), reinp
-                    )
-            if union.difference(df.columns).shape[0]:
-                return df.reindex(union, axis=1)
-            break
+        try:
+            one_path = next(self.paths)
+        except StopIteration:
+            return df
+
+        def _c_filter(c):
+            return not (c.startswith("__index") or c in df.index.names)
+
+        cols = list(filter(_c_filter, pq.read_schema(one_path).names))
+        union = df.columns.union(cols)
+        if union.difference(cols).shape[0]:
+            for path in self.paths:
+                lock = acquire_lock(path)
+                reindexed_df = pd.read_parquet(path).reindex(union, axis=1)
+                self._write_df_to_path(reindexed_df, path, lock)
+        if union.difference(df.columns).shape[0]:
+            return df.reindex(union, axis=1)
         return df
 
     def _mkdirs(self):
@@ -294,9 +283,6 @@ class TableRepo:
         self._current_env_parent.mkdir(exist_ok=True, parents=True)
         if not self._is_single_file:
             self.main_path.mkdir(exist_ok=True)
-
-    def _path_grouper(self, p: Path):
-        return p.relative_to(self.main_path).parts[: len(self.group_cols)]
 
     @property
     def _sorted_paths(self):
@@ -310,29 +296,13 @@ class TableRepo:
     def _current_env_parent(self) -> Path:
         return self._env_parents[self._current_env]
 
-    @property
-    def _gb_paths(self):
-        for _, g in groupby(self._sorted_paths, self._path_grouper):
-            yield list(g)
-
-    @property
-    def _grouped_kwargs(self):
-        return dict(
-            max_records=self.max_records,
-            ensure_same_cols=self._ensure_cols,
-            mkdirs=self._remake_dirs,
-            extra_metadata=self.extra_metadata,
-        )
-
 
 def _reducer(left, right):
     return _append(left, pd.read_parquet(right))
 
 
-def _append(top_df, bot_df):
-    return pd.concat(
-        [top_df, bot_df], ignore_index=isinstance(bot_df.index, pd.RangeIndex)
-    )
+def _append(top: pd.DataFrame, bot: pd.DataFrame):
+    return pd.concat([top, bot], ignore_index=isinstance(bot.index, pd.RangeIndex))
 
 
 def _map_group(paths, fun):
