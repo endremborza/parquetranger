@@ -17,7 +17,7 @@ _T_JSON_SERIALIZABLE = Union[str, int, list, dict]
 
 
 class TableRepo:
-    f"""helps with storing parquet data in a directory
+    """helps with storing, extending and reading tabular data in parquet format
 
     tries dividing based on group_cols, if that is None
     tries dividing based on max_records, if max records is 0
@@ -25,12 +25,6 @@ class TableRepo:
 
     if both group_cols and max_records is given, it will create
     directories for the groups (nested directories if multiple columns given)
-
-    if no `group_cols` is given, data will be broken up into
-    0{EXTENSION}, 1{EXTENSION}, ...
-
-    in case group cols is given replace group can be used
-    otherwise either extend or replace records based on index
     """
 
     def __init__(
@@ -43,6 +37,8 @@ class TableRepo:
         mkdirs=True,
         extra_metadata: Optional[Dict[str, _T_JSON_SERIALIZABLE]] = None,
     ):
+        self.max_records = max_records
+        self.group_cols = [group_cols] if isinstance(group_cols, str) else group_cols
         self.extra_metadata = extra_metadata or {}
         self._env_parents = env_parents or {}
         self._is_single_file = (not max_records) and (group_cols is None)
@@ -55,9 +51,6 @@ class TableRepo:
         self._default_env, e_path = [*_default_kv, (DEFAULT_ENV, _rp.parent)][0]
         self._env_parents[self._default_env] = e_path
         self._current_env = self._default_env
-
-        self.max_records = max_records
-        self.group_cols = [group_cols] if isinstance(group_cols, str) else group_cols
 
         self._mkdirs()
 
@@ -79,40 +72,17 @@ class TableRepo:
         with get_lock(f"{self.main_path} - ext"):
             self._extend_parts(df)
 
-    def batch_extend(
-        self,
-        df_iterator,
-        dist_api=DEFAULT_MULTI_API,
-        batch_size=None,
-        pbar=False,
-        **para_kwargs,
-    ):
-        parallel_map(
-            self.extend,
-            df_iterator,
-            batch_size=batch_size,
-            dist_api=dist_api,
-            pbar=pbar,
-            **para_kwargs,
-        )
+    def batch_extend(self, df_iterator, dist_api=DEFAULT_MULTI_API, **para_kwargs):
+        parallel_map(self.extend, df_iterator, dist_api=dist_api, **para_kwargs)
 
-    def map_partitions(
-        self,
-        fun,
-        dist_api=DEFAULT_MULTI_API,
-        batch_size=None,
-        pbar=False,
-        **para_kwargs,
-    ):
+    def map_partitions(self, fun, dist_api=DEFAULT_MULTI_API, **para_kwargs):
         def _path_grouper(p: Path):
             return p.relative_to(self.main_path).parts[: len(self.group_cols)]
 
         return parallel_map(
             partial(_map_group, fun=fun),
             map(lambda t: list(t[1]), groupby(self._sorted_paths, _path_grouper)),
-            batch_size=batch_size,
             dist_api=dist_api,
-            pbar=pbar,
             **para_kwargs,
         )
 
@@ -256,7 +226,7 @@ class TableRepo:
         gpath = Path(self.main_path, *gid.astype(str))
         getattr(TableRepo(gpath, **gb_kwargs), fun.__name__)(gdf)
 
-    def _reindex_cols(self, df):
+    def _reindex_cols(self, df: pd.DataFrame):
         try:
             one_path = next(self.paths)
         except StopIteration:
