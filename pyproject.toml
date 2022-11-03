@@ -4,22 +4,12 @@ dynamic = ["version", "description"]
 authors = [{name = "Endre Márk Borza", email = "endremborza@gmail.com"}]
 license = {file = "LICENSE"}
 readme = "README.md"
-requires-python = ">=3.8"
+requires-python = ">=3.10"
 dependencies = []
 
 [project.optional-dependencies]
 test = ["branthebuilder"]
-doc = [
-    "sphinx",
-    "pandoc",
-    "graphviz",
-    "sphinx-automodapi",
-    "sphinx-rtd-theme",
-    "myst-parser",
-    "pygments",
-    "jupyter",
-    "toml"
-]
+doc = ["branthebuilder[doc]"]
 
 [project.urls]
 Homepage = "https://github.com/endremborza/parquetranger"
