@@ -7,7 +7,7 @@ readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
     "pandas",
-    "pyarrow",
+    "pyarrow<10.0.0",
     "atqo>=0.2.2",
 ]
 
