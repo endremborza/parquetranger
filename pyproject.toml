@@ -13,17 +13,7 @@ dependencies = [
 
 [project.optional-dependencies]
 test = ["branthebuilder"]
-doc = [
-    "sphinx",
-    "pandoc",
-    "graphviz",
-    "sphinx-automodapi",
-    "sphinx-rtd-theme",
-    "myst-parser",
-    "pygments",
-    "jupyter",
-    "toml"
-]
+doc = ["branthebuilder[doc]"]
 
 [project.urls]
 Homepage = "https://github.com/endremborza/parquetranger"
