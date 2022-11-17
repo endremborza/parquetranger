@@ -1,10 +1,11 @@
 import json
+import pickle
 from contextlib import contextmanager
 from functools import partial, reduce
 from itertools import groupby
 from pathlib import Path
 from threading import Lock
-from typing import Dict, Iterable, Optional, Union
+from typing import Any, Dict, Iterable, Optional, Union
 
 import pandas as pd
 import pyarrow as pa
@@ -13,7 +14,7 @@ from atqo import DEFAULT_MULTI_API, acquire_lock, get_lock, parallel_map
 
 EXTENSION = ".parquet"
 DEFAULT_ENV = "default-env"
-_T_JSON_SERIALIZABLE = Union[str, int, list, dict]
+GB_KEY = "__gb_dict"
 
 
 class TableRepo:
@@ -35,9 +36,11 @@ class TableRepo:
         ensure_same_cols: bool = False,
         env_parents: Optional[Dict[str, Union[Path, str]]] = None,
         mkdirs=True,
-        extra_metadata: Optional[Dict[str, _T_JSON_SERIALIZABLE]] = None,
+        extra_metadata: Optional[Dict[str, Any]] = None,
+        drop_group_cols=False,
     ):
         self.max_records = max_records
+        self.drop_group_cols = drop_group_cols
         self.group_cols = [group_cols] if isinstance(group_cols, str) else group_cols
         self.extra_metadata = extra_metadata or {}
         self._env_parents = env_parents or {}
@@ -80,7 +83,7 @@ class TableRepo:
             return p.relative_to(self.main_path).parts[: len(self.group_cols)]
 
         return parallel_map(
-            partial(_map_group, fun=fun),
+            partial(self._map_group, fun=fun),
             map(lambda t: list(t[1]), groupby(self._sorted_paths, _path_grouper)),
             dist_api=dist_api,
             **para_kwargs,
@@ -95,7 +98,7 @@ class TableRepo:
 
         for full_path in self.paths:
             lock = acquire_lock(full_path)
-            odf = pd.read_parquet(full_path)
+            odf = self.read_df_from_path(full_path)
             inter_ind = odf.index.intersection(df.index)
             if len(inter_ind) == 0:
                 lock.release()
@@ -121,22 +124,16 @@ class TableRepo:
         for p in self.paths:
             p.unlink()
 
-    def get_full_df(self):
-        return reduce(_reducer, self.paths, pd.DataFrame())
+    def get_full_df(self) -> pd.DataFrame:
+        return reduce(self._reducer, self.paths, pd.DataFrame())
 
-    def get_partition_paths(self, partition_col: str):
-        part_ind = self.group_cols.index(partition_col)
-        path_indexer = part_ind - len(self.group_cols)
-        if self.max_records:
-            path_indexer -= 1
-
+    def get_partition_paths(
+        self, partition_col: str
+    ) -> Iterable[tuple[str, Iterable[Path]]]:
         def _getkey(path):
-            return Path(path).parts[path_indexer]
+            return dict(self._gb_cols_from_path(path))[partition_col]
 
-        for gid, paths in groupby(sorted(self.paths, key=_getkey), _getkey):
-            if path_indexer == -1:
-                gid = gid.replace(EXTENSION, "")
-            yield gid, list(paths)
+        return groupby(sorted(self.paths, key=_getkey), _getkey)
 
     def set_env(self, env: str):
         self._current_env = env
@@ -144,6 +141,11 @@ class TableRepo:
 
     def set_env_to_default(self):
         self.set_env(self._default_env)
+
+    def read_df_from_path(self, path: Path) -> pd.DataFrame:
+        # TODO: lock
+        gb_ass = self._parse_metadata(pq.read_schema(path).metadata).get(GB_KEY, {})
+        return pd.read_parquet(path).assign(**gb_ass)
 
     @contextmanager
     def env_ctx(self, env_name):
@@ -174,12 +176,11 @@ class TableRepo:
 
     @property
     def dfs(self) -> Iterable[pd.DataFrame]:
-        return map(pd.read_parquet, self.paths)
+        return map(self.read_df_from_path, self.paths)
 
     @property
     def full_metadata(self):
-        for path in self.paths:
-            return _parse_metadata(pq.read_schema(path).metadata)
+        return self._parse_metadata(pq.read_schema(next(self.paths)).metadata)
 
     def _write_df_to_path(self, df, path, lock: Optional[Lock] = None):
         """if lock is given, it should already be acquired"""
@@ -194,17 +195,30 @@ class TableRepo:
         start_rec = 0
         if self.n_files:
             last_path = self._sorted_paths[-1]
-            missing = self.max_records - pd.read_parquet(last_path).shape[0]
+            missing = self.max_records - self.read_df_from_path(last_path).shape[0]
             if missing > 0:
                 start_rec = missing
-                ext_df = _reducer(df.iloc[:missing, :], last_path)
+                ext_df = self._reducer(df.iloc[:missing, :], last_path)
                 self._write_df_to_path(ext_df, path=last_path)
 
         for i in range(start_rec, df.shape[0], self.max_records):
             new_path = self.main_path / f"file-{self.n_files:020d}{EXTENSION}"
             end = i + self.max_records
-            # FIXME: isnt iloc inclusive?
             df.iloc[i:end, :].pipe(self._write_df_to_path, path=new_path)
+
+    def _reducer(self, left, right: Path):
+        return _append(left, self.read_df_from_path(right))
+
+    def _map_group(self, paths, fun):
+        return fun(pd.concat(map(self.read_df_from_path, paths)))
+
+    def _gb_cols_from_path(self, path: Path):
+
+        i = -1 - int(self.max_records > 0)
+        for gc in self.group_cols[::-1]:
+            gid = path.parts[i]
+            yield gc, gid.replace(EXTENSION, "") if i == -1 else gid
+            i -= 1
 
     def _gb_handle(self, df: pd.DataFrame, fun):
         if self.group_cols is None:
@@ -214,17 +228,18 @@ class TableRepo:
 
     def _gapply(self, gdf: pd.DataFrame, fun):
         if gdf.empty:
-            # TODO: warn here
             return
         gid = gdf.iloc[[0], :].reset_index().loc[:, self.group_cols].values[0, :]
+        gb_meta = dict(zip(self.group_cols, gid))
         gb_kwargs = dict(
             max_records=self.max_records,
             ensure_same_cols=self._ensure_cols,
             mkdirs=self._remake_dirs,
-            extra_metadata=self.extra_metadata,
+            extra_metadata=self.extra_metadata | {GB_KEY: gb_meta},
         )
         gpath = Path(self.main_path, *gid.astype(str))
-        getattr(TableRepo(gpath, **gb_kwargs), fun.__name__)(gdf)
+        _gtrepo_fun = getattr(TableRepo(gpath, **gb_kwargs), fun.__name__)
+        _gtrepo_fun(gdf.drop(self.group_cols, axis=1) if self.drop_group_cols else gdf)
 
     def _reindex_cols(self, df: pd.DataFrame):
         try:
@@ -240,7 +255,7 @@ class TableRepo:
         if union.difference(cols).shape[0]:
             for path in self.paths:
                 lock = acquire_lock(path)
-                reindexed_df = pd.read_parquet(path).reindex(union, axis=1)
+                reindexed_df = self.read_df_from_path(path).reindex(union, axis=1)
                 self._write_df_to_path(reindexed_df, path, lock)
         if union.difference(df.columns).shape[0]:
             return df.reindex(union, axis=1)
@@ -252,6 +267,15 @@ class TableRepo:
         self._current_env_parent.mkdir(exist_ok=True, parents=True)
         if not self._is_single_file:
             self.main_path.mkdir(exist_ok=True)
+
+    def _parse_metadata(self, meta_dic: dict):
+        my_keys = [*self.extra_metadata.keys(), GB_KEY]
+        return {
+            k.decode("utf-8"): (
+                pickle.loads(v) if k.decode("utf-8") in my_keys else json.loads(v)
+            )
+            for k, v in meta_dic.items()
+        }
 
     @property
     def _sorted_paths(self):
@@ -266,21 +290,9 @@ class TableRepo:
         return self._env_parents[self._current_env]
 
 
-def _reducer(left, right):
-    return _append(left, pd.read_parquet(right))
-
-
 def _append(top: pd.DataFrame, bot: pd.DataFrame):
     return pd.concat([top, bot], ignore_index=isinstance(bot.index, pd.RangeIndex))
 
 
-def _map_group(paths, fun):
-    return fun(pd.concat(map(pd.read_parquet, paths)))
-
-
 def _render_metadata(meta_dic):
-    return {k: json.dumps(v).encode("utf-8") for k, v in meta_dic.items()}
-
-
-def _parse_metadata(meta_dic):
-    return {k.decode("utf-8"): json.loads(v) for k, v in meta_dic.items()}
+    return {k: pickle.dumps(v) for k, v in meta_dic.items()}

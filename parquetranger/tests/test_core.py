@@ -59,6 +59,7 @@ def test_groupby(tmp_path, gb_cols):
 
     troot = tmp_path / "data"
     trepo = TableRepo(troot, group_cols=gb_cols)
+    assert trepo.vc_path == troot
     base = []
     for _df in [df1, df2, df3]:
         trepo.extend(_df)
@@ -72,6 +73,13 @@ def test_groupby(tmp_path, gb_cols):
         conc = pd.concat(base)
         full_df = trepo.get_full_df()
         assert conc.reindex(full_df.index).equals(full_df)
+
+
+def test_extend(tmp_path):
+    trepo = TableRepo(tmp_path / "data", max_records=2)
+    big_df = pd.concat([df1, df2, df3, df4])
+    trepo.extend(big_df)
+    assert trepo.get_full_df().shape == big_df.shape
 
 
 def test_gb_maxrecs(tmp_path):
@@ -182,28 +190,19 @@ def test_bygroups_error(tmp_path):
         trepo.replace_groups(df1)
 
 
-def test_strin(tmp_path):
-    _basetest(TableRepo(str(tmp_path / "data" / "subdir")))
-
-
-@pytest.mark.parametrize(
-    ["gcols", "max_records"],
-    [*product([None, "C", ["C", "C2"], ["C2", "C"], "C2"], [0, 1])],
-)
-def test_part_paths(tmp_path, gcols, max_records):
-    troot = tmp_path / "tab"
-    trepo = TableRepo(troot, group_cols=gcols, max_records=max_records)
-    trepo.extend(df1)
+def test_part_paths(mock_trepo: TableRepo):
+    mock_trepo.extend(df1)
+    gcols = mock_trepo.group_cols
     if gcols is None:
-        with pytest.raises(AttributeError):
-            [*trepo.get_partition_paths("C")]
+        with pytest.raises(TypeError):
+            [*mock_trepo.get_partition_paths("C")]
         return
 
     for part_col in gcols if isinstance(gcols, list) else [gcols]:
         gb_dic = {str(gid): gdf for gid, gdf in df1.groupby(part_col)}
-        for gid, gpaths in trepo.get_partition_paths(part_col):
-            gdf = pd.concat(map(pd.read_parquet, gpaths))
-            assert gdf.equals(gb_dic[gid].reindex(gdf.index))
+        for gid, gpaths in mock_trepo.get_partition_paths(part_col):
+            gdf = pd.concat(map(mock_trepo.read_df_from_path, gpaths))
+            gdf.equals(gb_dic[gid].reindex(gdf.index).reindex(gdf.columns, axis=1))
 
 
 def test_cat_gb(tmp_path):
@@ -213,15 +212,36 @@ def test_cat_gb(tmp_path):
     )
 
 
-def _basetest(trepo: TableRepo):
+def trepo_kwarg_iter():
+    for gcols, max_records, drop_group_cols in product(
+        [None, "C", ["C", "C2"], ["C2", "C"], "C2"], [0, 1], [True, False]
+    ):
+        yield dict(
+            group_cols=gcols,
+            max_records=max_records,
+            drop_group_cols=drop_group_cols,
+        )
+
+
+@pytest.fixture(params=list(trepo_kwarg_iter()))
+def mock_trepo(tmp_path, request):
+    return TableRepo(tmp_path / "data", **request.param)
+
+
+def test_basic(mock_trepo: TableRepo):
     base = []
     for _df in [df1, df2]:
-        trepo.extend(_df)
+        mock_trepo.extend(_df)
         base.append(_df)
         conc = pd.concat(base)
-        full_df = trepo.get_full_df()
-        assert conc.reindex(full_df.index).equals(full_df)
-    trepo.replace_all(df3)
-    assert trepo.get_full_df().equals(df3)
-    trepo.purge()
-    assert trepo.get_full_df().empty
+        full_df = mock_trepo.get_full_df()
+        conc.reindex(full_df.index).equals(full_df.reindex(conc.columns, axis=1))
+    mock_trepo.replace_all(df3)
+    assert (
+        mock_trepo.get_full_df()
+        .reindex(df3.index)
+        .reindex(df3.columns, axis=1)
+        .equals(df3)
+    )
+    mock_trepo.purge()
+    assert mock_trepo.get_full_df().empty
