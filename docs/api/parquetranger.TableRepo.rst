@@ -28,6 +28,7 @@ TableRepo
       ~TableRepo.get_partition_paths
       ~TableRepo.map_partitions
       ~TableRepo.purge
+      ~TableRepo.read_df_from_path
       ~TableRepo.replace_all
       ~TableRepo.replace_groups
       ~TableRepo.replace_records
@@ -52,6 +53,7 @@ TableRepo
    .. automethod:: get_partition_paths
    .. automethod:: map_partitions
    .. automethod:: purge
+   .. automethod:: read_df_from_path
    .. automethod:: replace_all
    .. automethod:: replace_groups
    .. automethod:: replace_records
