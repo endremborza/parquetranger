@@ -212,6 +212,12 @@ def test_cat_gb(tmp_path):
     )
 
 
+def test_no_cols(tmp_path):
+    trepo = TableRepo(tmp_path / "data")
+    trepo.replace_records(pd.DataFrame({"A": [1, 2, 3]}).set_index("A"))
+    assert trepo.get_full_df().shape[0] == 3
+
+
 def trepo_kwarg_iter():
     for gcols, max_records, drop_group_cols in product(
         [None, "C", ["C", "C2"], ["C2", "C"], "C2"], [0, 1], [True, False]
