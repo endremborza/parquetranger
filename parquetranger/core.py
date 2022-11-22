@@ -107,7 +107,7 @@ class TableRepo:
             self._write_df_to_path(odf, path=full_path, lock=lock)
             df = df.drop(inter_ind)
 
-        if not df.empty:
+        if df.shape[0] > 0:
             self.extend(df)
 
     def replace_groups(self, df: pd.DataFrame):
