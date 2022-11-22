@@ -66,7 +66,8 @@ def test_native_map_partitions(tmp_path, rowcount, max_records, group_cols):
         index=pd.Series(range(0, rowcount)).astype(str).str.zfill(10),
     )
     trepo1.extend(df)
-    trepo1.map_partitions(partial(_gbmapper, trepo=trepo2, gcols=group_cols))
+    for _ in trepo1.map_partitions(partial(_gbmapper, trepo=trepo2, gcols=group_cols)):
+        pass
     assert_frame_equal(
         df.groupby(group_cols)[["A", "B"]].mean().reset_index(),
         trepo2.get_full_df().sort_values(group_cols).reset_index(drop=True),

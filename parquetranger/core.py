@@ -76,7 +76,7 @@ class TableRepo:
             self._extend_parts(df)
 
     def batch_extend(self, df_iterator, dist_api=DEFAULT_MULTI_API, **para_kwargs):
-        parallel_map(self.extend, df_iterator, dist_api=dist_api, **para_kwargs)
+        list(parallel_map(self.extend, df_iterator, dist_api=dist_api, **para_kwargs))
 
     def map_partitions(self, fun, dist_api=DEFAULT_MULTI_API, **para_kwargs):
         def _path_grouper(p: Path):
