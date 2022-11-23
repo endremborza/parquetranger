@@ -10,7 +10,7 @@ from typing import Any, Dict, Iterable, Optional, Union
 import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
-from atqo import DEFAULT_MULTI_API, acquire_lock, get_lock, parallel_map
+from atqo import acquire_lock, get_lock, parallel_map
 
 EXTENSION = ".parquet"
 DEFAULT_ENV = "default-env"
@@ -75,21 +75,24 @@ class TableRepo:
         with get_lock(f"{self.main_path} - ext"):
             self._extend_parts(df)
 
-    def batch_extend(self, df_iterator, dist_api=DEFAULT_MULTI_API, **para_kwargs):
-        list(parallel_map(self.extend, df_iterator, dist_api=dist_api, **para_kwargs))
+    def batch_extend(self, df_iterator, **para_kwargs):
+        list(parallel_map(self.extend, df_iterator, **para_kwargs))
 
-    def map_partitions(self, fun, dist_api=DEFAULT_MULTI_API, **para_kwargs):
-        _main_at_call = self.main_path
+    def map_partitions(self, fun, level=None, **para_kwargs):
 
-        def _path_grouper(p: Path):
-            return p.relative_to(_main_at_call).parts[: len(self.group_cols)]
+        _mi = int(self.max_records > 0)
+        lev_ind = slice(-len(self.group_cols) - _mi, -_mi or None)
+        if level is None:
 
-        return parallel_map(
-            partial(self._map_group, fun=fun),
-            map(lambda t: list(t[1]), groupby(self._sorted_paths, _path_grouper)),
-            dist_api=dist_api,
-            **para_kwargs,
-        )
+            def _idf(p: Path):
+                return p.parts[lev_ind]
+
+        else:
+            _idf = self._gb_cols_from_path_meta(level)
+
+        p_iter = map(lambda t: list(t[1]), groupby(sorted(self.paths, key=_idf), _idf))
+
+        return parallel_map(partial(self._map_paths, fun=fun), p_iter, **para_kwargs)
 
     def replace_records(self, df: pd.DataFrame, by_groups=False):
         """replace records in files based on index"""
@@ -132,8 +135,7 @@ class TableRepo:
     def get_partition_paths(
         self, partition_col: str
     ) -> Iterable[tuple[str, Iterable[Path]]]:
-        def _getkey(path):
-            return dict(self._gb_cols_from_path(path))[partition_col]
+        _getkey = self._gb_cols_from_path_meta(partition_col)
 
         return groupby(sorted(self.paths, key=_getkey), _getkey)
 
@@ -196,7 +198,7 @@ class TableRepo:
     def _extend_parts(self, df: pd.DataFrame):
         start_rec = 0
         if self.n_files:
-            last_path = self._sorted_paths[-1]
+            last_path = sorted(self.paths)[-1]
             missing = self.max_records - self.read_df_from_path(last_path).shape[0]
             if missing > 0:
                 start_rec = missing
@@ -211,16 +213,18 @@ class TableRepo:
     def _reducer(self, left, right: Path):
         return _append(left, self.read_df_from_path(right))
 
-    def _map_group(self, paths, fun):
+    def _map_paths(self, paths, fun):
         return fun(pd.concat(map(self.read_df_from_path, paths)))
 
-    def _gb_cols_from_path(self, path: Path):
+    def _gb_cols_from_path_meta(self, key):
+        def d(path: Path):
+            i = -1 - int(self.max_records > 0)
+            for gc in self.group_cols[::-1]:
+                gid = path.parts[i]
+                yield gc, gid.replace(EXTENSION, "") if i == -1 else gid
+                i -= 1
 
-        i = -1 - int(self.max_records > 0)
-        for gc in self.group_cols[::-1]:
-            gid = path.parts[i]
-            yield gc, gid.replace(EXTENSION, "") if i == -1 else gid
-            i -= 1
+        return lambda p: dict(d(p))[key]
 
     def _gb_handle(self, df: pd.DataFrame, fun):
         if self.group_cols is None:
@@ -278,10 +282,6 @@ class TableRepo:
             )
             for k, v in meta_dic.items()
         }
-
-    @property
-    def _sorted_paths(self):
-        return sorted(self.paths)
 
     @property
     def _df_path(self):
