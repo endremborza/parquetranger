@@ -79,8 +79,10 @@ class TableRepo:
         list(parallel_map(self.extend, df_iterator, dist_api=dist_api, **para_kwargs))
 
     def map_partitions(self, fun, dist_api=DEFAULT_MULTI_API, **para_kwargs):
+        _main_at_call = self.main_path
+
         def _path_grouper(p: Path):
-            return p.relative_to(self.main_path).parts[: len(self.group_cols)]
+            return p.relative_to(_main_at_call).parts[: len(self.group_cols)]
 
         return parallel_map(
             partial(self._map_group, fun=fun),
