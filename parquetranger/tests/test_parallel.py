@@ -46,15 +46,8 @@ def test_native_map_partitions(tmp_path, rowcount, max_records, group_cols):
     seed = 100
 
     rng = np.random.RandomState(seed)
-    trepo1 = TableRepo(
-        tmp_path / "d1",
-        group_cols=group_cols,
-        max_records=max_records,
-    )
-
-    trepo2 = TableRepo(
-        tmp_path / "d2",
-    )
+    trepo1 = TableRepo(tmp_path / "d1", group_cols=group_cols, max_records=max_records)
+    trepo2 = TableRepo(tmp_path / "d2")
 
     df = pd.DataFrame(
         {
