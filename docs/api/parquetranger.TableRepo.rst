@@ -24,8 +24,12 @@ TableRepo
       ~TableRepo.batch_extend
       ~TableRepo.env_ctx
       ~TableRepo.extend
+      ~TableRepo.get_extending_df_batch_writer
+      ~TableRepo.get_extending_dict_batch_writer
       ~TableRepo.get_full_df
       ~TableRepo.get_partition_paths
+      ~TableRepo.get_replacing_df_batch_writer
+      ~TableRepo.get_replacing_dict_batch_writer
       ~TableRepo.map_partitions
       ~TableRepo.purge
       ~TableRepo.read_df_from_path
@@ -49,8 +53,12 @@ TableRepo
    .. automethod:: batch_extend
    .. automethod:: env_ctx
    .. automethod:: extend
+   .. automethod:: get_extending_df_batch_writer
+   .. automethod:: get_extending_dict_batch_writer
    .. automethod:: get_full_df
    .. automethod:: get_partition_paths
+   .. automethod:: get_replacing_df_batch_writer
+   .. automethod:: get_replacing_dict_batch_writer
    .. automethod:: map_partitions
    .. automethod:: purge
    .. automethod:: read_df_from_path
