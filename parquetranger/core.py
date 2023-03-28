@@ -1,11 +1,12 @@
 import json
 import pickle
 from contextlib import contextmanager
+from dataclasses import dataclass, field
 from functools import partial, reduce
 from itertools import groupby
 from pathlib import Path
 from threading import Lock
-from typing import Any, Dict, Iterable, Optional, Union
+from typing import Any, Callable, Dict, Iterable, Optional, Union
 
 import pandas as pd
 import pyarrow as pa
@@ -79,7 +80,6 @@ class TableRepo:
         list(parallel_map(self.extend, df_iterator, **para_kwargs))
 
     def map_partitions(self, fun, level=None, **para_kwargs):
-
         _mi = int(self.max_records > 0)
         lev_ind = slice(-len(self.group_cols) - _mi, -_mi or None)
         if level is None:
@@ -150,6 +150,18 @@ class TableRepo:
         # TODO: lock
         gb_ass = self._parse_metadata(pq.read_schema(path).metadata).get(GB_KEY, {})
         return pd.read_parquet(path).assign(**gb_ass)
+
+    def get_extending_dict_batch_writer(self, max_records=1_000_000):
+        return RecordWriter(self, max_records)
+
+    def get_extending_df_batch_writer(self, max_records=1_000_000):
+        return DfBatchWriter(self, max_records)
+
+    def get_replacing_dict_batch_writer(self, max_records=1_000_000):
+        return RecordWriter(self, max_records, TableRepo.replace_records)
+
+    def get_replacing_df_batch_writer(self, max_records=1_000_000):
+        return DfBatchWriter(self, max_records, TableRepo.replace_records)
 
     @contextmanager
     def env_ctx(self, env_name):
@@ -290,6 +302,49 @@ class TableRepo:
     @property
     def _current_env_parent(self) -> Path:
         return self._env_parents[self._current_env]
+
+
+@dataclass
+class RecordWriter:
+    trepo: TableRepo
+    record_limit: int = 1_000_000
+    writer_function: Callable = TableRepo.extend
+    _batch: list = field(default_factory=list, init=False)
+    _record_count: int = field(default=0, init=False)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_value, exc_traceback):
+        if self._batch:
+            self._write()
+
+    def add_to_batch(self, element):
+        self._batch.append(element)
+        self._record_count += self._rec_count_from_elem(element)
+        if self._record_count >= self.record_limit:
+            self._write()
+
+    def _write(self):
+        self.writer_function(self.trepo, self._wrap_batch())
+        self._batch = []
+        self._record_count = 0
+
+    def _wrap_batch(self):
+        return pd.DataFrame(self._batch)
+
+    def _rec_count_from_elem(self, elem):
+        return 1
+
+
+@dataclass
+class DfBatchWriter(RecordWriter):
+    def _wrap_batch(self):
+        ig_ind = isinstance(self._batch[0].index, pd.RangeIndex)
+        return pd.concat(self._batch, ignore_index=ig_ind)
+
+    def _rec_count_from_elem(self, elem: pd.DataFrame):
+        return elem.shape[0]
 
 
 def _append(top: pd.DataFrame, bot: pd.DataFrame):
