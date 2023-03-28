@@ -4,7 +4,6 @@ from .test_core import df1, df2
 
 
 def test_envs(tmp_path):
-
     defp = tmp_path / "def"
     testp = tmp_path / "test"
 
@@ -20,7 +19,6 @@ def test_envs(tmp_path):
 
 
 def test_env_ctx(tmp_path):
-
     fp1 = tmp_path / "fp1"
     fp2 = tmp_path / "fp2"
 

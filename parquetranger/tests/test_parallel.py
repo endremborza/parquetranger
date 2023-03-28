@@ -43,7 +43,6 @@ def test_para_extend(tmp_path, seed, batches, rowcount, max_records, group_cols)
     product([10, 100, 1000], [0, 90, 900], ["C", ["C", "G"]]),
 )
 def test_native_map_partitions(tmp_path, rowcount, max_records, group_cols):
-
     seed = 100
 
     rng = np.random.RandomState(seed)

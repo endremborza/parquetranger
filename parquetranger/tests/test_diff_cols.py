@@ -13,7 +13,6 @@ from parquetranger import TableRepo
     ],
 )
 def test_diff_cols(tmp_path, indices):
-
     _df1 = pd.DataFrame({"A": [1, 2], "C": ["g1", "g1"]}, index=indices)
     _df2 = pd.DataFrame({"B": [1, 2], "C": ["g2", "g2"]}, index=indices)
 
@@ -26,7 +25,6 @@ def test_diff_cols(tmp_path, indices):
 
 
 def test_diff_schema(tmp_path):
-
     _df1 = pd.DataFrame({"A": [1, 2], "C": ["g1", "g1"]})
     _df2 = pd.DataFrame({"A": [1.2, 2.2], "C": ["g2", "g2"]})
 

@@ -4,7 +4,6 @@ from parquetranger import TableRepo
 
 
 def test_simple_metadata(tmp_path):
-
     df = pd.DataFrame(
         {"d": pd.date_range("2020-01-01", "2020-01-10"), "x": range(2, 12)}
     )

@@ -56,7 +56,6 @@ df4 = pd.DataFrame(
     ],
 )
 def test_groupby(tmp_path, gb_cols):
-
     troot = tmp_path / "data"
     trepo = TableRepo(troot, group_cols=gb_cols)
     assert trepo.vc_path == troot
@@ -103,7 +102,6 @@ def test_gb_maxrecs(tmp_path):
     ],
 )
 def test_extender_records(tmp_path, max_records, n_files):
-
     trepo = TableRepo(tmp_path, max_records=max_records)
     base = []
     for _df in [df1, df2, df3]:
@@ -148,7 +146,6 @@ def test_replace_records(tmp_path, max_records, n_files):
 
 
 def test_gb_replace(tmp_path):
-
     _df1 = pd.DataFrame(
         {
             "A": [1, 2, 3],
