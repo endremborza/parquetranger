@@ -74,7 +74,11 @@ class TableRepo:
                 base_table = self.read_table_from_path(
                     self._df_path, lock, release=False
                 )
-                out_table = pa.concat_tables([base_table, resolved_table])
+                # BUG: https://github.com/apache/arrow/issues/34782
+                if base_table.num_rows == 0:
+                    out_table = base_table
+                else:
+                    out_table = pa.concat_tables([base_table, resolved_table])
             else:
                 out_table = resolved_table
             return self._write_table_to_path(out_table, self._df_path, lock)
@@ -134,6 +138,8 @@ class TableRepo:
         """purges everything"""
         for p in self.paths:
             p.unlink()
+        if self._meta_path.exists():
+            self._meta_path.unlink()
 
     def get_full_df(self) -> pd.DataFrame:
         return self.get_full_table().to_pandas()
@@ -316,41 +322,41 @@ class TableRepo:
         return table
 
     def _get_full_meta_dict(self, new_table: pa.Table):
-        new_dict = _schema_to_dic(new_table.schema)
         metafix_lock = acquire_lock(f"{self.main_path} - meta")
         try:
-            if self._fixed_meta is not None:
-                old_dict = self._fixed_meta
-            else:
-                first_path = self._meta_path
-                first_lock = acquire_lock(first_path)
-                if first_path.exists():
-                    old_dict = _schema_to_dic(pq.read_schema(first_path))
-                else:
-                    rep_table = pa.Table.from_pylist(
-                        [],
-                        schema=pa.schema(
-                            new_dict.items(), metadata=new_table.schema.metadata
-                        ),
-                    )
-                    pq.write_table(rep_table, first_path)
-                    old_dict = new_dict
-                first_lock.release()
-            full_dict = self._fixed_meta or (
-                (new_dict | old_dict) if self._allow_meta_extension else old_dict
-            )
-            if (new_dict != full_dict) or (old_dict != full_dict):
-                _w = f"mismatched schemas: \n{new_dict}\n{old_dict}\n{full_dict}"
-                warnings.warn(_w, UserWarning)
-                if full_dict.keys() - old_dict.keys():
-                    for path in self.paths:
-                        lock = acquire_lock(path)
-                        old_table = self.read_table_from_path(path, lock, release=False)
-                        self._write_table_to_path(
-                            _cast_table(old_table, full_dict), path, lock
-                        )
+            return self._inner_meta_dict(new_table)
         finally:
             metafix_lock.release()
+
+    def _inner_meta_dict(self, new_table: pa.Table):
+        new_dict = _schema_to_dic(new_table.schema)
+        if self._fixed_meta is not None:
+            old_dict = self._fixed_meta
+        else:
+            first_path = self._meta_path
+            first_lock = acquire_lock(first_path)
+            if first_path.exists():
+                old_dict = _schema_to_dic(pq.read_schema(first_path))
+            else:
+                _pmeta = new_table.schema.metadata
+                new_schema = pa.schema(new_dict.items(), metadata=_pmeta)
+                rep_table = pa.Table.from_pylist([], schema=new_schema)
+                pq.write_table(rep_table, first_path)
+                old_dict = new_dict
+            first_lock.release()
+        full_dict = self._fixed_meta or (
+            (new_dict | old_dict) if self._allow_meta_extension else old_dict
+        )
+        if (new_dict != full_dict) or (old_dict != full_dict):
+            _w = f"mismatched schemas: \n{new_dict}\n{old_dict}\n{full_dict}"
+            warnings.warn(_w, UserWarning)
+            if full_dict.keys() - old_dict.keys():
+                for path in self.paths:
+                    lock = acquire_lock(path)
+                    old_table = self.read_table_from_path(path, lock, release=False)
+                    self._write_table_to_path(
+                        _cast_table(old_table, full_dict), path, lock
+                    )
         return full_dict
 
     def _mkdirs(self):
