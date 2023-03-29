@@ -193,6 +193,9 @@ class TableRepo:
     def get_extending_dict_batch_writer(self, max_records=1_000_000):
         return RecordWriter(self, max_records)
 
+    def get_extending_fixed_dict_batch_writer(self, cols, max_records=1_000_000):
+        return FixedRecordWriter(trepo=self, record_limit=max_records, cols=cols)
+
     def get_extending_df_batch_writer(self, max_records=1_000_000):
         return DfBatchWriter(self, max_records)
 
@@ -408,7 +411,7 @@ class RecordWriter:
         self.close()
 
     def add_to_batch(self, element):
-        self._batch.append(element)
+        self._batch.append(self._parse_elem(element))
         self._record_count += self._rec_count_from_elem(element)
         if self._record_count >= self.record_limit:
             self._write()
@@ -425,8 +428,20 @@ class RecordWriter:
     def _wrap_batch(self):
         return pd.DataFrame(self._batch)
 
+    def _parse_elem(self, elem):
+        return elem
+
     def _rec_count_from_elem(self, elem):
         return 1
+
+
+@dataclass
+class FixedRecordWriter(RecordWriter):
+
+    cols: list[str] = field(default_factory=list)
+
+    def _parse_elem(self, elem):
+        return {k: elem.get(k) for k in self.cols}
 
 
 @dataclass

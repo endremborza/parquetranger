@@ -1,3 +1,5 @@
+import random
+
 import pandas as pd
 
 from parquetranger import TableRepo
@@ -46,3 +48,17 @@ def test_df_batch_writer(tmp_path):
     assert not new_full.equals(first_full)
     assert new_full.shape == first_full.shape
     assert new_full.loc[list(range(50, 59)), 0].tolist() == list(range(8, -1, -1))
+
+
+def test_fix_writer(tmp_path):
+    trepo = TableRepo(tmp_path / "data")
+
+    rng = random.Random(742)
+
+    with trepo.get_extending_fixed_dict_batch_writer(["a", "b"], 3) as writer:
+        for i in range(30):
+            writer.add_to_batch(
+                {k: rng.random() for k in rng.sample(["a", "b", "c", "d"], 2)}
+            )
+
+    assert trepo.get_full_df().columns.tolist() == ["a", "b"]
