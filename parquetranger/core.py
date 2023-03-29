@@ -1,13 +1,15 @@
 import json
 import pickle
+import warnings
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from functools import partial, reduce
+from functools import partial
 from itertools import groupby
 from pathlib import Path
 from threading import Lock
 from typing import Any, Callable, Dict, Iterable, Optional, Union
 
+import numpy as np
 import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -34,20 +36,23 @@ class TableRepo:
         root_path: Union[Path, str],
         max_records: int = 0,
         group_cols: Optional[Union[str, list]] = None,
-        ensure_same_cols: bool = False,
         env_parents: Optional[Dict[str, Union[Path, str]]] = None,
         mkdirs=True,
         extra_metadata: Optional[Dict[str, Any]] = None,
-        drop_group_cols=False,
+        drop_group_cols: bool = False,
+        fixed_metadata: Optional[dict] = None,
+        allow_metadata_extension: bool = False,
     ):
         self.max_records = max_records
-        self.drop_group_cols = drop_group_cols
+        self.drop_group_cols = drop_group_cols  # also means 'read group cols'
         self.group_cols = [group_cols] if isinstance(group_cols, str) else group_cols
         self.extra_metadata = extra_metadata or {}
         self._env_parents = env_parents or {}
         self._is_single_file = (not max_records) and (group_cols is None)
         self._remake_dirs = mkdirs
-        self._ensure_cols = ensure_same_cols
+
+        self._fixed_meta = fixed_metadata
+        self._allow_meta_extension = allow_metadata_extension
 
         _rp = Path(root_path)
         self.name = _rp.name
@@ -59,22 +64,44 @@ class TableRepo:
         self._mkdirs()
 
     def extend(self, df: pd.DataFrame):
-        if self._ensure_cols:
-            df = self._reindex_cols(df)
-
         if self.group_cols is not None:
             return self._gb_handle(df, self.extend)
 
+        resolved_table = self._resolve_metadata(df)
         if self.max_records == 0:
             lock = acquire_lock(self._df_path)
-            return (
-                self.get_full_df()
-                .pipe(_append, df)
-                .pipe(self._write_df_to_path, path=self._df_path, lock=lock)
-            )
+            if self._df_path.exists():
+                base_table = self.read_table_from_path(
+                    self._df_path, lock, release=False
+                )
+                out_table = pa.concat_tables([base_table, resolved_table])
+            else:
+                out_table = resolved_table
+            return self._write_table_to_path(out_table, self._df_path, lock)
 
         with get_lock(f"{self.main_path} - ext"):
-            self._extend_parts(df)
+            self._extend_parts(resolved_table)
+
+    def replace_records(self, df: pd.DataFrame, by_groups=False):
+        """replace records in files based on index"""
+        if by_groups:
+            return self._gb_handle(df, self.replace_records)
+
+        df = df.loc[~df.index.duplicated(keep="first"), :]
+
+        for full_path in self.paths:
+            lock = acquire_lock(full_path)
+            odf = self.read_df_from_path(full_path, lock, release=False)
+            inter_ind = odf.index.intersection(df.index)
+            if len(inter_ind) == 0:
+                lock.release()
+                continue
+            odf.loc[inter_ind, :] = df.loc[inter_ind, :]
+            self._write_df_to_path(odf, path=full_path, lock=lock)
+            df = df.drop(inter_ind)
+
+        if df.shape[0] > 0:
+            self.extend(df)
 
     def batch_extend(self, df_iterator, **para_kwargs):
         list(parallel_map(self.extend, df_iterator, **para_kwargs))
@@ -94,27 +121,6 @@ class TableRepo:
 
         return parallel_map(partial(self._map_paths, fun=fun), p_iter, **para_kwargs)
 
-    def replace_records(self, df: pd.DataFrame, by_groups=False):
-        """replace records in files based on index"""
-        if by_groups:
-            return self._gb_handle(df, self.replace_records)
-
-        df = df.loc[~df.index.duplicated(keep="first"), :]
-
-        for full_path in self.paths:
-            lock = acquire_lock(full_path)
-            odf = self.read_df_from_path(full_path)
-            inter_ind = odf.index.intersection(df.index)
-            if len(inter_ind) == 0:
-                lock.release()
-                continue
-            odf.loc[inter_ind, :] = df.loc[inter_ind, :]
-            self._write_df_to_path(odf, path=full_path, lock=lock)
-            df = df.drop(inter_ind)
-
-        if df.shape[0] > 0:
-            self.extend(df)
-
     def replace_groups(self, df: pd.DataFrame):
         """replace files based on file name, only viable if `group_cols` is set"""
         return self._gb_handle(df, self.replace_all)
@@ -130,7 +136,12 @@ class TableRepo:
             p.unlink()
 
     def get_full_df(self) -> pd.DataFrame:
-        return reduce(self._reducer, self.paths, pd.DataFrame())
+        return self.get_full_table().to_pandas()
+
+    def get_full_table(self) -> pa.Table:
+        if plist := list(self.paths):
+            return pa.concat_tables(map(self.read_table_from_path, plist))
+        return pa.Table.from_pydict({})
 
     def get_partition_paths(
         self, partition_col: str
@@ -146,10 +157,32 @@ class TableRepo:
     def set_env_to_default(self):
         self.set_env(self._default_env)
 
-    def read_df_from_path(self, path: Path) -> pd.DataFrame:
-        # TODO: lock
-        gb_ass = self._parse_metadata(pq.read_schema(path).metadata).get(GB_KEY, {})
-        return pd.read_parquet(path).assign(**gb_ass)
+    def read_table_from_path(
+        self, path, lock: Optional[Lock] = None, release=True
+    ) -> pa.Table:
+        assert release or (lock is not None)
+        if lock is None:
+            lock = acquire_lock(path)
+        try:
+            out: pa.Table = pq.read_table(path)
+        except Exception as e:  # pragma: no cover
+            lock.release()
+            raise e
+        if release:
+            lock.release()
+        if not self.drop_group_cols:
+            return out
+        n = out.num_rows
+        for k, v in (
+            self._parse_metadata(out.schema.metadata or {}).get(GB_KEY, {}).items()
+        ):
+            out = out.append_column(k, pa.array(np.repeat(v, n)))
+        return out
+
+    def read_df_from_path(
+        self, path: Path, lock: Optional[Lock] = None, release=True
+    ) -> pd.DataFrame:
+        return self.read_table_from_path(path, lock, release).to_pandas()
 
     def get_extending_dict_batch_writer(self, max_records=1_000_000):
         return RecordWriter(self, max_records)
@@ -198,32 +231,34 @@ class TableRepo:
     def full_metadata(self):
         return self._parse_metadata(pq.read_schema(next(self.paths)).metadata)
 
-    def _write_df_to_path(self, df, path, lock: Optional[Lock] = None):
-        """if lock is given, it should already be acquired"""
-        table = pa.Table.from_pandas(df)
-        new_meta = table.schema.metadata | _render_metadata(self.extra_metadata)
+    def _write_table_to_path(self, table: pa.Table, path, lock: Optional[Lock] = None):
+        new_meta = (table.schema.metadata or {}) | _render_metadata(self.extra_metadata)
         if lock is None:
             lock = acquire_lock(path)
-        pq.write_table(table.replace_schema_metadata(new_meta), path)
-        lock.release()
+        try:
+            pq.write_table(table.replace_schema_metadata(new_meta), path)
+        finally:
+            lock.release()
 
-    def _extend_parts(self, df: pd.DataFrame):
+    def _write_df_to_path(self, df, path, lock: Optional[Lock] = None):
+        """if lock is given, it should already be acquired"""
+        self._write_table_to_path(pa.Table.from_pandas(df), path, lock)
+
+    def _extend_parts(self, table: pa.Table):
         start_rec = 0
         if self.n_files:
             last_path = sorted(self.paths)[-1]
-            missing = self.max_records - self.read_df_from_path(last_path).shape[0]
+            with get_lock(last_path):
+                missing = self.max_records - _read_size_from_path(last_path)
             if missing > 0:
                 start_rec = missing
-                ext_df = self._reducer(df.iloc[:missing, :], last_path)
-                self._write_df_to_path(ext_df, path=last_path)
+                old_table = self.read_table_from_path(last_path)
+                _ctab = pa.concat_tables([old_table, table.slice(0, missing)])
+                self._write_table_to_path(_ctab, last_path)
 
-        for i in range(start_rec, df.shape[0], self.max_records):
+        for i in range(start_rec, table.num_rows, self.max_records):
             new_path = self.main_path / f"file-{self.n_files:020d}{EXTENSION}"
-            end = i + self.max_records
-            df.iloc[i:end, :].pipe(self._write_df_to_path, path=new_path)
-
-    def _reducer(self, left, right: Path):
-        return _append(left, self.read_df_from_path(right))
+            self._write_table_to_path(table.slice(i, self.max_records), new_path)
 
     def _map_paths(self, paths, fun):
         return fun(pd.concat(map(self.read_df_from_path, paths)))
@@ -242,42 +277,81 @@ class TableRepo:
         if self.group_cols is None:
             raise TypeError("only works if group cols is set")
 
-        df.groupby(self.group_cols).apply(self._gapply, fun)
+        ignore_index = isinstance(df.index, pd.RangeIndex)
+        min_table = pa.Table.from_pandas(df.iloc[:2, :].pipe(self._de_grc))
+        new_fix_meta = self._get_full_meta_dict(min_table)
 
-    def _gapply(self, gdf: pd.DataFrame, fun):
+        for gid, gdf in df.groupby(self.group_cols):
+            self._gapply(
+                gdf.reset_index(drop=True) if ignore_index else gdf,
+                gid,
+                fun,
+                new_fix_meta,
+            )
+
+    def _gapply(self, gdf: pd.DataFrame, gid_raw, fun, meta_dic):
         if gdf.empty:
             return
-        gid = gdf.iloc[[0], :].reset_index().loc[:, self.group_cols].values[0, :]
+        gid = gid_raw if isinstance(gid_raw, tuple) else (gid_raw,)
         gb_meta = dict(zip(self.group_cols, gid))
         gb_kwargs = dict(
             max_records=self.max_records,
-            ensure_same_cols=self._ensure_cols,
             mkdirs=self._remake_dirs,
             extra_metadata=self.extra_metadata | {GB_KEY: gb_meta},
+            drop_group_cols=False,
+            fixed_metadata=meta_dic,
         )
-        gpath = Path(self.main_path, *gid.astype(str))
+        gpath = Path(self.main_path, *map(str, gid))
         _gtrepo_fun = getattr(TableRepo(gpath, **gb_kwargs), fun.__name__)
-        _gtrepo_fun(gdf.drop(self.group_cols, axis=1) if self.drop_group_cols else gdf)
+        _gtrepo_fun(gdf.pipe(self._de_grc))
 
-    def _reindex_cols(self, df: pd.DataFrame):
+    def _resolve_metadata(self, df: pd.DataFrame):
+        # cast the new to old types
+        # add empty ones to old ones only
+        table = pa.Table.from_pandas(df)
+        new_dict = _schema_to_dic(table.schema)
+        full_dict = self._get_full_meta_dict(table)
+        if new_dict != full_dict:
+            return _cast_table(table, full_dict)
+        return table
+
+    def _get_full_meta_dict(self, new_table: pa.Table):
+        new_dict = _schema_to_dic(new_table.schema)
+        metafix_lock = acquire_lock(f"{self.main_path} - meta")
         try:
-            one_path = next(self.paths)
-        except StopIteration:
-            return df
-
-        def _c_filter(c):
-            return not (c.startswith("__index") or c in df.index.names)
-
-        cols = list(filter(_c_filter, pq.read_schema(one_path).names))
-        union = df.columns.union(cols)
-        if union.difference(cols).shape[0]:
-            for path in self.paths:
-                lock = acquire_lock(path)
-                reindexed_df = self.read_df_from_path(path).reindex(union, axis=1)
-                self._write_df_to_path(reindexed_df, path, lock)
-        if union.difference(df.columns).shape[0]:
-            return df.reindex(union, axis=1)
-        return df
+            if self._fixed_meta is not None:
+                old_dict = self._fixed_meta
+            else:
+                first_path = self._meta_path
+                first_lock = acquire_lock(first_path)
+                if first_path.exists():
+                    old_dict = _schema_to_dic(pq.read_schema(first_path))
+                else:
+                    rep_table = pa.Table.from_pylist(
+                        [],
+                        schema=pa.schema(
+                            new_dict.items(), metadata=new_table.schema.metadata
+                        ),
+                    )
+                    pq.write_table(rep_table, first_path)
+                    old_dict = new_dict
+                first_lock.release()
+            full_dict = self._fixed_meta or (
+                (new_dict | old_dict) if self._allow_meta_extension else old_dict
+            )
+            if (new_dict != full_dict) or (old_dict != full_dict):
+                _w = f"mismatched schemas: \n{new_dict}\n{old_dict}\n{full_dict}"
+                warnings.warn(_w, UserWarning)
+                if full_dict.keys() - old_dict.keys():
+                    for path in self.paths:
+                        lock = acquire_lock(path)
+                        old_table = self.read_table_from_path(path, lock, release=False)
+                        self._write_table_to_path(
+                            _cast_table(old_table, full_dict), path, lock
+                        )
+        finally:
+            metafix_lock.release()
+        return full_dict
 
     def _mkdirs(self):
         if not self._remake_dirs:
@@ -294,6 +368,15 @@ class TableRepo:
             )
             for k, v in meta_dic.items()
         }
+
+    def _de_grc(self, df):
+        return df.drop(self.group_cols, axis=1) if self.drop_group_cols else df
+
+    @property
+    def _meta_path(self):
+        if self._is_single_file:
+            return self._df_path
+        return self.main_path / "empty.meta"
 
     @property
     def _df_path(self):
@@ -316,13 +399,16 @@ class RecordWriter:
         return self
 
     def __exit__(self, exc_type, exc_value, exc_traceback):
-        if self._batch:
-            self._write()
+        self.close()
 
     def add_to_batch(self, element):
         self._batch.append(element)
         self._record_count += self._rec_count_from_elem(element)
         if self._record_count >= self.record_limit:
+            self._write()
+
+    def close(self):
+        if self._batch:
             self._write()
 
     def _write(self):
@@ -347,9 +433,25 @@ class DfBatchWriter(RecordWriter):
         return elem.shape[0]
 
 
-def _append(top: pd.DataFrame, bot: pd.DataFrame):
-    return pd.concat([top, bot], ignore_index=isinstance(bot.index, pd.RangeIndex))
-
-
 def _render_metadata(meta_dic):
     return {k: pickle.dumps(v) for k, v in meta_dic.items()}
+
+
+def _schema_to_dic(sch):
+    return dict(zip(sch.names, sch.types))
+
+
+def _read_size_from_path(path):
+    return pq.read_metadata(path).num_rows
+
+
+def _cast_table(table: pa.Table, dic: dict[str, pa.DataType]):
+    arrs = []
+    for k, v in dic.items():
+        try:
+            arrs.append(table[k].cast(v))
+        except KeyError:
+            arrs.append(pa.array(np.repeat(None, table.num_rows), type=v))
+    # TODO: pd schema.metadata here not added
+    # difficult to create
+    return pa.Table.from_arrays(arrs, schema=pa.schema(dic.items()))

@@ -110,7 +110,7 @@ def test_extender_records(tmp_path, max_records, n_files):
 
         conc = pd.concat(base)
         full_df = trepo.get_full_df()
-        assert conc.reindex(full_df.index).equals(full_df)
+        conc.reindex(full_df.index).pipe(pd.testing.assert_frame_equal, full_df)
 
     assert trepo.n_files == n_files
 
@@ -240,11 +240,11 @@ def test_basic(mock_trepo: TableRepo):
         full_df = mock_trepo.get_full_df()
         conc.reindex(full_df.index).equals(full_df.reindex(conc.columns, axis=1))
     mock_trepo.replace_all(df3)
-    assert (
+    (
         mock_trepo.get_full_df()
         .reindex(df3.index)
         .reindex(df3.columns, axis=1)
-        .equals(df3)
+        .pipe(pd.testing.assert_frame_equal, df3)
     )
     mock_trepo.purge()
     assert mock_trepo.get_full_df().empty
