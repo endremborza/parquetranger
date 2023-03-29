@@ -26,6 +26,7 @@ TableRepo
       ~TableRepo.extend
       ~TableRepo.get_extending_df_batch_writer
       ~TableRepo.get_extending_dict_batch_writer
+      ~TableRepo.get_extending_fixed_dict_batch_writer
       ~TableRepo.get_full_df
       ~TableRepo.get_full_table
       ~TableRepo.get_partition_paths
@@ -57,6 +58,7 @@ TableRepo
    .. automethod:: extend
    .. automethod:: get_extending_df_batch_writer
    .. automethod:: get_extending_dict_batch_writer
+   .. automethod:: get_extending_fixed_dict_batch_writer
    .. automethod:: get_full_df
    .. automethod:: get_full_table
    .. automethod:: get_partition_paths
