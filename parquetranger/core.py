@@ -76,7 +76,7 @@ class TableRepo:
                 )
                 # BUG: https://github.com/apache/arrow/issues/34782
                 if base_table.num_rows == 0:
-                    out_table = base_table
+                    out_table = resolved_table
                 else:
                     out_table = pa.concat_tables([base_table, resolved_table])
             else:
