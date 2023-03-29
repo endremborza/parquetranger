@@ -17,6 +17,7 @@ RecordWriter
    .. autosummary::
 
       ~RecordWriter.add_to_batch
+      ~RecordWriter.close
       ~RecordWriter.writer_function
 
    .. rubric:: Attributes Documentation
@@ -26,4 +27,5 @@ RecordWriter
    .. rubric:: Methods Documentation
 
    .. automethod:: add_to_batch
+   .. automethod:: close
    .. automethod:: writer_function
