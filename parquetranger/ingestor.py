@@ -53,6 +53,8 @@ class ObjIngestor:
             return
         if isinstance(obj, ATOM_TYPES):
             return self.ingest({ATOM_KEY: obj}, (*parents, ATOM_KEY), parent_id)
+        if not obj:
+            return
         # level = len(parents) todo for key forwarding
         comp_elems = {}
         type_map = {}
@@ -90,7 +92,8 @@ class ObjIngestor:
         try:
             if key_map_path.exists():
                 self.keydic.update(json.loads(key_map_path.read_text()))
-            key_map_path.write_text(json.dumps(self.keydic))
+            if key_map_path.parent.exists():
+                key_map_path.write_text(json.dumps(self.keydic))
         finally:
             map_lock.release()
 

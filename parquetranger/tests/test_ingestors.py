@@ -59,3 +59,8 @@ def test_ingestor_add_key(tmp_path):
 
     with ObjIngestor(tmp_path / "data", root_id_key="id_", force_key=True) as ing:
         ing.ingest({"X": 20})
+
+
+def test_empty(tmp_path):
+    with ObjIngestor(tmp_path / "data") as ing:
+        ing.ingest({})
