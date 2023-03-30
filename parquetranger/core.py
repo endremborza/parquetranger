@@ -320,7 +320,7 @@ class TableRepo:
         table = pa.Table.from_pandas(df)
         new_dict = _schema_to_dic(table.schema)
         full_dict = self._get_full_meta_dict(table)
-        if new_dict != full_dict:
+        if list(new_dict.items()) != list(full_dict.items()):
             return _cast_table(table, full_dict)
         return table
 
@@ -347,19 +347,21 @@ class TableRepo:
                 pq.write_table(rep_table, first_path)
                 old_dict = new_dict
             first_lock.release()
-        full_dict = self._fixed_meta or (
-            (new_dict | old_dict) if self._allow_meta_extension else old_dict
-        )
-        if (new_dict != full_dict) or (old_dict != full_dict):
+        if self._fixed_meta:
+            full_dict = self._fixed_meta
+        elif self._allow_meta_extension:
+            full_dict = old_dict | {
+                k: v for k, v in new_dict.items() if k not in old_dict
+            }
+        else:
+            full_dict = old_dict
+        if full_dict.keys() - old_dict.keys():
             _w = f"mismatched schemas: \n{new_dict}\n{old_dict}\n{full_dict}"
             warnings.warn(_w, UserWarning)
-            if full_dict.keys() - old_dict.keys():
-                for path in self.paths:
-                    lock = acquire_lock(path)
-                    old_table = self.read_table_from_path(path, lock, release=False)
-                    self._write_table_to_path(
-                        _cast_table(old_table, full_dict), path, lock
-                    )
+            for path in self.paths:
+                lock = acquire_lock(path)
+                old_table = self.read_table_from_path(path, lock, release=False)
+                self._write_table_to_path(_cast_table(old_table, full_dict), path, lock)
         return full_dict
 
     def _mkdirs(self):
@@ -401,8 +403,8 @@ class RecordWriter:
     trepo: TableRepo
     record_limit: int = 1_000_000
     writer_function: Callable = TableRepo.extend
+    record_count: int = field(default=0, init=False)
     _batch: list = field(default_factory=list, init=False)
-    _record_count: int = field(default=0, init=False)
 
     def __enter__(self):
         return self
@@ -412,18 +414,19 @@ class RecordWriter:
 
     def add_to_batch(self, element):
         self._batch.append(self._parse_elem(element))
-        self._record_count += self._rec_count_from_elem(element)
-        if self._record_count >= self.record_limit:
+        self.record_count += self._rec_count_from_elem(element)
+        if self.record_count >= self.record_limit:
             self._write()
 
     def close(self):
         if self._batch:
             self._write()
+        self.record_count = 0
 
     def _write(self):
         self.writer_function(self.trepo, self._wrap_batch())
         self._batch = []
-        self._record_count = 0
+        self.record_count = 0
 
     def _wrap_batch(self):
         return pd.DataFrame(self._batch)
@@ -437,7 +440,6 @@ class RecordWriter:
 
 @dataclass
 class FixedRecordWriter(RecordWriter):
-
     cols: list[str] = field(default_factory=list)
 
     def _parse_elem(self, elem):
@@ -471,7 +473,9 @@ def _cast_table(table: pa.Table, dic: dict[str, pa.DataType]):
     for k, v in dic.items():
         try:
             arrs.append(table[k].cast(v))
-        except KeyError:
+        except Exception as e:
+            if not isinstance(e, KeyError):
+                warnings.warn(f"couldnt cast {k} to {v}", UserWarning())
             arrs.append(pa.array(np.repeat(None, table.num_rows), type=v))
     # TODO: pd schema.metadata here not added
     # difficult to create

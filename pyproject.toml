@@ -12,7 +12,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-test = ["branthebuilder"]
+test = ["branthebuilder", "faker"]
 doc = ["branthebuilder[doc]"]
 
 [project.urls]
