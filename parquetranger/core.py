@@ -237,6 +237,10 @@ class TableRepo:
         return map(self.read_df_from_path, self.paths)
 
     @property
+    def tables(self) -> Iterable[pa.Table]:
+        return map(self.read_table_from_path, self.paths)
+
+    @property
     def full_metadata(self):
         return self._parse_metadata(pq.read_schema(next(self.paths)).metadata)
 
