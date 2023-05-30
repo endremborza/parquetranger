@@ -3,11 +3,13 @@ import pickle
 import warnings
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from functools import partial
+from functools import cached_property, partial
+from hashlib import md5
 from itertools import groupby
+from math import log10
 from pathlib import Path
 from threading import Lock
-from typing import Any, Callable, Dict, Iterable, Optional, Union
+from typing import Callable, Iterable, Optional
 
 import numpy as np
 import pandas as pd
@@ -18,6 +20,28 @@ from atqo import acquire_lock, get_lock, parallel_map
 EXTENSION = ".parquet"
 DEFAULT_ENV = "default-env"
 GB_KEY = "__gb_dict"
+
+
+@dataclass
+class HashPartitioner:
+    col: str | None = None  # if none it is index
+    num_groups: int = 128
+
+    def __call__(self, df: pd.DataFrame) -> pd.Series:
+        base = df.index if self.col is None else df.loc[:, self.col]
+        return base.astype(str).map(self.h)
+
+    def h(self, elem: str):
+        num = int(md5(elem.encode()).hexdigest(), base=16) % self.num_groups
+        return f"{num:0{self._w}d}"
+
+    @property
+    def key(self):
+        return f"__pqr-hash-{self.col}-{self.num_groups}__"
+
+    @cached_property
+    def _w(self):
+        return int(log10(self.num_groups)) + 1
 
 
 class TableRepo:
@@ -33,22 +57,23 @@ class TableRepo:
 
     def __init__(
         self,
-        root_path: Union[Path, str],
+        root_path: Path | str,
         max_records: int = 0,
-        group_cols: Optional[Union[str, list]] = None,
-        env_parents: Optional[Dict[str, Union[Path, str]]] = None,
+        group_cols: str | list | HashPartitioner | None = None,
+        env_parents: dict[str, Path | str] | None = None,
         mkdirs=True,
-        extra_metadata: Optional[Dict[str, Any]] = None,
+        extra_metadata: dict | None = None,
         drop_group_cols: bool = False,
-        fixed_metadata: Optional[dict] = None,
+        fixed_metadata: dict | None = None,
         allow_metadata_extension: bool = False,
     ):
         self.max_records = max_records
         self.drop_group_cols = drop_group_cols  # also means 'read group cols'
-        self.group_cols = [group_cols] if isinstance(group_cols, str) else group_cols
         self.extra_metadata = extra_metadata or {}
+        self._raw_grouper = group_cols
         self._env_parents = env_parents or {}
-        self._is_single_file = (not max_records) and (group_cols is None)
+        self._is_grouped = group_cols is not None
+        self._is_single_file = not (max_records or self._is_grouped)
         self._remake_dirs = mkdirs
 
         self._fixed_meta = fixed_metadata
@@ -61,10 +86,10 @@ class TableRepo:
         self._env_parents[self._default_env] = e_path
         self._current_env = self._default_env
 
-        self._mkdirs()
+        self.mkdirs()
 
     def extend(self, df: pd.DataFrame):
-        if self.group_cols is not None:
+        if self._is_grouped:
             return self._gb_handle(df, self.extend)
 
         resolved_table = self._resolve_metadata(df)
@@ -156,9 +181,21 @@ class TableRepo:
 
         return groupby(sorted(self.paths, key=_getkey), _getkey)
 
+    def get_partition_table(
+        self, partition: str, partition_col: str | None = None
+    ) -> pa.Table:
+        pcol = partition_col or self.group_cols[0]
+        ppaths = filter(lambda t: t[0] == partition, self.get_partition_paths(pcol))
+        return pa.concat_tables(map(self.read_table_from_path, next(ppaths)[1]))
+
+    def get_partition_df(
+        self, partition: str, partition_col: str | None = None
+    ) -> pd.DataFrame:
+        return self.get_partition_table(partition, partition_col).to_pandas()
+
     def set_env(self, env: str):
         self._current_env = env
-        self._mkdirs()
+        self.mkdirs()
 
     def set_env_to_default(self):
         self.set_env(self._default_env)
@@ -218,8 +255,7 @@ class TableRepo:
 
     @property
     def vc_path(self) -> Path:
-        multi_file = (self.max_records > 0) or self.group_cols
-        return self.main_path if multi_file else self._df_path
+        return self._df_path if self._is_single_file else self.main_path
 
     @property
     def paths(self) -> Iterable[Path]:
@@ -243,6 +279,17 @@ class TableRepo:
     @property
     def full_metadata(self):
         return self._parse_metadata(pq.read_schema(next(self.paths)).metadata)
+
+    @property
+    def group_cols(self):
+        if isinstance(self._raw_grouper, str):
+            return [self._raw_grouper]
+        elif isinstance(self._raw_grouper, HashPartitioner):
+            return [self._raw_grouper.key]
+        assert (
+            isinstance(self._raw_grouper, list) or self._raw_grouper is None
+        ), "must be a valid grouper"
+        return self._raw_grouper
 
     def _write_table_to_path(self, table: pa.Table, path, lock: Optional[Lock] = None):
         new_meta = (table.schema.metadata or {}) | _render_metadata(self.extra_metadata)
@@ -287,14 +334,20 @@ class TableRepo:
         return lambda p: dict(d(p))[key]
 
     def _gb_handle(self, df: pd.DataFrame, fun):
-        if self.group_cols is None:
+        if not self._is_grouped:
             raise TypeError("only works if group cols is set")
 
         ignore_index = isinstance(df.index, pd.RangeIndex)
-        min_table = pa.Table.from_pandas(df.iloc[:2, :].pipe(self._de_grc))
-        new_fix_meta = self._get_full_meta_dict(min_table)
+        _schema = pa.Schema.from_pandas(df.pipe(self._de_grc))
+        new_fix_meta = self._get_full_meta_dict(_schema)
 
-        for gid, gdf in df.groupby(self.group_cols):
+        grouper = (
+            self._raw_grouper(df)
+            if isinstance(self._raw_grouper, HashPartitioner)
+            else self.group_cols
+        )
+
+        for gid, gdf in df.groupby(grouper):
             self._gapply(
                 gdf.reset_index(drop=True) if ignore_index else gdf,
                 gid,
@@ -302,7 +355,7 @@ class TableRepo:
                 new_fix_meta,
             )
 
-    def _gapply(self, gdf: pd.DataFrame, gid_raw, fun, meta_dic):
+    def _gapply(self, gdf: pd.DataFrame, gid_raw: tuple | str, fun, meta_dic):
         if gdf.empty:
             return
         gid = gid_raw if isinstance(gid_raw, tuple) else (gid_raw,)
@@ -323,34 +376,30 @@ class TableRepo:
         # add empty ones to old ones only
         table = pa.Table.from_pandas(df)
         new_dict = _schema_to_dic(table.schema)
-        full_dict = self._get_full_meta_dict(table)
+        full_dict = self._get_full_meta_dict(table.schema)
         if list(new_dict.items()) != list(full_dict.items()):
             return _cast_table(table, full_dict)
         return table
 
-    def _get_full_meta_dict(self, new_table: pa.Table):
-        metafix_lock = acquire_lock(f"{self.main_path} - meta")
-        try:
-            return self._inner_meta_dict(new_table)
-        finally:
-            metafix_lock.release()
+    def _get_full_meta_dict(self, new_schema: pa.Schema):
+        with _try_lock(f"{self.main_path} - meta"):
+            return self._inner_meta_dict(new_schema)
 
-    def _inner_meta_dict(self, new_table: pa.Table):
-        new_dict = _schema_to_dic(new_table.schema)
+    def _inner_meta_dict(self, new_schema: pa.Schema):
+        new_dict = _schema_to_dic(new_schema)
         if self._fixed_meta is not None:
             old_dict = self._fixed_meta
         else:
             first_path = self._meta_path
-            first_lock = acquire_lock(first_path)
-            if first_path.exists():
-                old_dict = _schema_to_dic(pq.read_schema(first_path))
-            else:
-                _pmeta = new_table.schema.metadata
-                new_schema = pa.schema(new_dict.items(), metadata=_pmeta)
-                rep_table = pa.Table.from_pylist([], schema=new_schema)
-                pq.write_table(rep_table, first_path)
-                old_dict = new_dict
-            first_lock.release()
+            with _try_lock(first_path):
+                if first_path.exists():
+                    old_dict = _schema_to_dic(pq.read_schema(first_path))
+                else:
+                    _pmeta = new_schema.metadata
+                    new_schema = pa.schema(new_dict.items(), metadata=_pmeta)
+                    rep_table = pa.Table.from_pylist([], schema=new_schema)
+                    pq.write_table(rep_table, first_path)
+                    old_dict = new_dict
         if self._fixed_meta:
             full_dict = self._fixed_meta
         elif self._allow_meta_extension:
@@ -368,8 +417,8 @@ class TableRepo:
                 self._write_table_to_path(_cast_table(old_table, full_dict), path, lock)
         return full_dict
 
-    def _mkdirs(self):
-        if not self._remake_dirs:
+    def mkdirs(self, force=False):
+        if not (self._remake_dirs or force):
             return
         self._current_env_parent.mkdir(exist_ok=True, parents=True)
         if not self._is_single_file:
@@ -407,8 +456,12 @@ class RecordWriter:
     trepo: TableRepo
     record_limit: int = 1_000_000
     writer_function: Callable = TableRepo.extend
+    batch: list = field(default_factory=list)
     record_count: int = field(default=0, init=False)
-    _batch: list = field(default_factory=list, init=False)
+    written_count: int = field(default=0, init=False)
+
+    def __post_init__(self):
+        self.record_count = len(self.batch)
 
     def __enter__(self):
         return self
@@ -417,23 +470,29 @@ class RecordWriter:
         self.close()
 
     def add_to_batch(self, element):
-        self._batch.append(self._parse_elem(element))
+        self.batch.append(self._parse_elem(element))
         self.record_count += self._rec_count_from_elem(element)
         if self.record_count >= self.record_limit:
             self._write()
 
     def close(self):
-        if self._batch:
+        if self.batch:
             self._write()
         self.record_count = 0
 
     def _write(self):
-        self.writer_function(self.trepo, self._wrap_batch())
-        self._batch = []
+        for _ in range(2):
+            try:
+                self.writer_function(self.trepo, self._wrap_batch())
+                break
+            except FileNotFoundError:
+                self.trepo.mkdirs(True)
+        self.written_count += len(self.batch)
+        self.batch = []
         self.record_count = 0
 
     def _wrap_batch(self):
-        return pd.DataFrame(self._batch)
+        return pd.DataFrame(self.batch)
 
     def _parse_elem(self, elem):
         return elem
@@ -453,11 +512,20 @@ class FixedRecordWriter(RecordWriter):
 @dataclass
 class DfBatchWriter(RecordWriter):
     def _wrap_batch(self):
-        ig_ind = isinstance(self._batch[0].index, pd.RangeIndex)
-        return pd.concat(self._batch, ignore_index=ig_ind)
+        ig_ind = isinstance(self.batch[0].index, pd.RangeIndex)
+        return pd.concat(self.batch, ignore_index=ig_ind)
 
     def _rec_count_from_elem(self, elem: pd.DataFrame):
         return elem.shape[0]
+
+
+@contextmanager
+def _try_lock(lock_name):
+    lock = acquire_lock(lock_name)
+    try:
+        yield
+    finally:
+        lock.release()
 
 
 def _render_metadata(meta_dic):
@@ -479,7 +547,7 @@ def _cast_table(table: pa.Table, dic: dict[str, pa.DataType]):
             arrs.append(table[k].cast(v))
         except Exception as e:
             if not isinstance(e, KeyError):
-                warnings.warn(f"couldnt cast {k} to {v}", UserWarning())
+                warnings.warn(f"couldn't cast {k} to {v}")
             arrs.append(pa.array(np.repeat(None, table.num_rows), type=v))
     # TODO: pd schema.metadata here not added
     # difficult to create

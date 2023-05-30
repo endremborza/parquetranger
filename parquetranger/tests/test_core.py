@@ -1,10 +1,11 @@
+import random
 from itertools import product
 from pathlib import Path
 
 import pandas as pd
 import pytest
 
-from parquetranger import TableRepo
+from parquetranger import HashPartitioner, TableRepo
 from parquetranger.core import EXTENSION
 
 df1 = pd.DataFrame(
@@ -248,3 +249,52 @@ def test_basic(mock_trepo: TableRepo):
     )
     mock_trepo.purge()
     assert mock_trepo.get_full_df().empty
+
+
+def test_datetime(tmp_path):
+    trepo = TableRepo(tmp_path / "dt-test", max_records=7)
+    df = pd.DataFrame({"d": pd.date_range("2023-04-04", 10)})
+    trepo.extend(df)
+    trepo.extend(df)
+
+
+def test_missing(tmp_path):
+    trepo = TableRepo(tmp_path / "trepo", group_cols=["c"])
+    df = pd.DataFrame(
+        {"f": [None] * 5 + [1.2], "c": list("AAABBB"), "s": [None] * 5 + ["whoo"]}
+    )
+    trepo.extend(df)
+    assert trepo.get_full_df().isna().sum()[["f", "s"]].tolist() == [5, 5]
+
+
+def test_hasher(tmp_path):
+    trepo = TableRepo(tmp_path / "data", group_cols=HashPartitioner("C", num_groups=3))
+    df = pd.DataFrame({"C": list("efg" * 3), "A": range(9)})
+    trepo.extend(df)
+    assert trepo.get_partition_df("2").shape == (6, 2)
+
+    trepo2 = TableRepo(
+        tmp_path / "data2", group_cols=HashPartitioner("C", num_groups=300)
+    )
+    trepo2.extend(df)
+    assert trepo2.get_partition_df("166").shape == (3, 2)
+
+
+def test_extend_performance(tmp_path: Path):
+    trepo = TableRepo(tmp_path / "test")
+    n = 10_000
+    m = 40
+    rng = random.Random(7)
+    dfs = [
+        pd.DataFrame(
+            {
+                "A": [rng.random() for _ in range(n)],
+                "B": [rng.randint(0, 1000) for _ in range(n)],
+                "C": [rng.randbytes(20) for _ in range(n)],
+            }
+        )
+        for _ in range(m)
+    ]
+    for _df in dfs:
+        trepo.extend(_df)
+    assert trepo.get_full_df().equals(pd.concat(dfs, ignore_index=True))
