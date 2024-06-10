@@ -410,7 +410,7 @@ class TableRepo:
             full_dict = old_dict
         keydiff = full_dict.keys() - old_dict.keys()
         if keydiff:
-            _w = f"mismatched schemas: \n" + "\n".join(
+            _w = "mismatched schemas: \n" + "\n".join(
                 [f"new: {new_dict}", f"old: {old_dict}", f"full: {full_dict}"]
             )
             warnings.warn(f"key difference: {keydiff}", UserWarning)
