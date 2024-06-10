@@ -408,8 +408,10 @@ class TableRepo:
             }
         else:
             full_dict = old_dict
-        if full_dict.keys() - old_dict.keys():
-            _w = f"mismatched schemas: \n{new_dict}\n{old_dict}\n{full_dict}"
+        keydiff = full_dict.keys() - old_dict.keys()
+        if keydiff:
+            _w = f"mismatched schemas: \nnew: {new_dict}\nold: {old_dict}\nfull: {full_dict}\n"
+            warnings.warn(f"key difference: {keydiff}", UserWarning)
             warnings.warn(_w, UserWarning)
             for path in self.paths:
                 lock = acquire_lock(path)
