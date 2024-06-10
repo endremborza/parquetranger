@@ -10,7 +10,9 @@ RecordWriter
 
    .. autosummary::
 
+      ~RecordWriter.record_count
       ~RecordWriter.record_limit
+      ~RecordWriter.written_count
 
    .. rubric:: Methods Summary
 
@@ -22,7 +24,9 @@ RecordWriter
 
    .. rubric:: Attributes Documentation
 
+   .. autoattribute:: record_count
    .. autoattribute:: record_limit
+   .. autoattribute:: written_count
 
    .. rubric:: Methods Documentation
 
