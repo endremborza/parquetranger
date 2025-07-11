@@ -54,5 +54,4 @@ def test_nulls(tmp_path):
     trepo.extend(_df2)
 
     df = trepo.get_full_df()
-    print(df)
     assert _df1.columns.union(_df2.columns).isin(df.columns).all()
